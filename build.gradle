@@ -1,35 +1,40 @@
 plugins {
-    id 'java-library'
+    id 'com.google.protobuf' version '0.9.5' apply false
 }
 
-group = 'dev.feddi'
+allprojects {
+    repositories {
+        mavenCentral()
+    }
+}
+
+group = 'dev.feddi.build'
 version = '0.1.0-SNAPSHOT'
 
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+subprojects {
+    apply plugin: 'java-library'
+
+    group = 'dev.feddi'
+    version = '0.1.0-SNAPSHOT'
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+        withSourcesJar()
     }
-    withSourcesJar()
-}
 
-repositories {
-    mavenCentral()
-}
+    dependencies {
+        testImplementation platform('org.junit:junit-bom:6.0.3')
+        testImplementation 'org.junit.jupiter:junit-jupiter'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
 
-dependencies {
-    implementation 'io.projectreactor:reactor-core:3.8.4'
-    implementation 'com.google.protobuf:protobuf-java:4.34.1'
+    tasks.withType(JavaCompile).configureEach {
+        options.release = 21
+    }
 
-    testImplementation platform('org.junit:junit-bom:6.0.3')
-    testImplementation 'org.junit.jupiter:junit-jupiter'
-    testImplementation 'io.projectreactor:reactor-test:3.8.4'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-}
-
-tasks.withType(JavaCompile).configureEach {
-    options.release = 21
-}
-
-test {
-    useJUnitPlatform()
+    test {
+        useJUnitPlatform()
+    }
 }

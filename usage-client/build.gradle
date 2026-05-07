@@ -1,0 +1,10 @@
+base {
+    archivesName = 'feddi-api-usage-client'
+}
+
+dependencies {
+    api project(':feddi-api-usage-proto')
+    api 'io.projectreactor:reactor-core:3.8.4'
+
+    testImplementation 'io.projectreactor:reactor-test:3.8.4'
+}

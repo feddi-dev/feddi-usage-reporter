@@ -1,0 +1,17 @@
+plugins {
+    id 'com.google.protobuf'
+}
+
+base {
+    archivesName = 'feddi-api-usage-proto'
+}
+
+dependencies {
+    api 'com.google.protobuf:protobuf-java:4.34.1'
+}
+
+protobuf {
+    protoc {
+        artifact = 'com.google.protobuf:protoc:4.34.1'
+    }
+}
