@@ -18,7 +18,6 @@ message UsageRecord {
   string operation_hash = 3;
   string operation_body = 4;
   repeated string field_coordinates = 5;
-  repeated string subgraphs_accessed = 6;
   int64 duration_nanos = 7;
   bool http_error = 8;
   bool graphql_error = 9;

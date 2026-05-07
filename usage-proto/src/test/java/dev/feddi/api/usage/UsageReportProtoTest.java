@@ -23,7 +23,6 @@ class UsageReportProtoTest {
                         .setOperationBody("query GetUser { user { id name } }")
                         .addFieldCoordinates("Query.user")
                         .addFieldCoordinates("User.id")
-                        .addSubgraphsAccessed("users")
                         .setDurationNanos(1_500_000)
                         .setHttpError(false)
                         .setGraphqlError(true)
@@ -46,7 +45,6 @@ class UsageReportProtoTest {
         assertEquals("query GetUser { user { id name } }", record.getOperationBody());
         assertEquals("Query.user", record.getFieldCoordinates(0));
         assertEquals("User.id", record.getFieldCoordinates(1));
-        assertEquals("users", record.getSubgraphsAccessed(0));
         assertEquals(1_500_000, record.getDurationNanos());
         assertTrue(record.getGraphqlError());
         assertEquals("web-app", record.getClientName());
