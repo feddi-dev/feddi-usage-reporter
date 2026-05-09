@@ -17,9 +17,9 @@ deployments can override the host, but the endpoint path is always
 `/api/usage-proto`.
 
 `ApiUsageReporter` receives a GraphQL Java `Document`, operation name, and
-`GraphQLSchema` for each completed API call. It generates the canonical
-operation document with `AstSignature`, extracts field coordinates, field
-argument coordinates, and input object field coordinates, samples
+`GraphQLSchema` for each completed API call. It generates an input-aware
+canonical operation document with `AstSignature`, extracts field coordinates,
+field argument coordinates, and input object field coordinates, samples
 high-throughput traffic, and periodically flushes protobuf batches to the
 feddi Platform.
 

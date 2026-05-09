@@ -1,6 +1,7 @@
 package dev.feddi.api.usage;
 
 import dev.feddi.api.usage.v1.InputUsageCoordinateKind;
+import graphql.execution.CoercedVariables;
 import graphql.language.AstPrinter;
 import graphql.language.AstSignature;
 import graphql.language.Argument;
@@ -15,8 +16,6 @@ import graphql.language.OperationDefinition;
 import graphql.language.Selection;
 import graphql.language.SelectionSet;
 import graphql.language.Value;
-import graphql.language.VariableDefinition;
-import graphql.language.VariableReference;
 import graphql.schema.GraphQLArgument;
 import graphql.schema.GraphQLFieldsContainer;
 import graphql.schema.GraphQLFieldDefinition;
@@ -24,7 +23,6 @@ import graphql.schema.GraphQLInputObjectType;
 import graphql.schema.GraphQLInputType;
 import graphql.schema.GraphQLInterfaceType;
 import graphql.schema.GraphQLList;
-import graphql.schema.GraphQLModifiedType;
 import graphql.schema.GraphQLObjectType;
 import graphql.schema.GraphQLSchema;
 import graphql.schema.GraphQLType;
@@ -44,13 +42,18 @@ final class ApiUsageDocumentAnalyzer {
 
     ProcessedUsage analyze(ApiUsageInvocation invocation) {
         var operation = findOperation(invocation.document(), invocation.operationName());
-        var normalized = new AstSignature().signatureQuery(invocation.document(), invocation.operationName());
-        var canonicalDocument = AstPrinter.printAstCompact(normalized);
-        var usageCoordinates = extractUsageCoordinates(
-                operation,
+        var signatureDocument = new AstSignature().signatureWithInput(
                 invocation.document(),
+                invocation.operationName(),
                 invocation.schema(),
-                invocation.variables()
+                CoercedVariables.of(invocation.variables())
+        );
+        var signatureOperation = findOperation(signatureDocument, invocation.operationName());
+        var canonicalDocument = AstPrinter.printAstCompact(signatureDocument);
+        var usageCoordinates = extractUsageCoordinates(
+                signatureOperation,
+                signatureDocument,
+                invocation.schema()
         );
 
         return new ProcessedUsage(
@@ -79,23 +82,18 @@ final class ApiUsageDocumentAnalyzer {
     private static UsageCoordinates extractUsageCoordinates(
             OperationDefinition operation,
             Document document,
-            GraphQLSchema schema,
-            Map<String, @Nullable Object> variables
+            GraphQLSchema schema
     ) {
         Set<String> fieldCoordinates = new LinkedHashSet<>();
         Set<InputUsageCoordinate> inputUsageCoordinates = new LinkedHashSet<>();
         var fragments = document.getDefinitionsOfType(FragmentDefinition.class).stream()
                 .collect(Collectors.toMap(FragmentDefinition::getName, fragment -> fragment));
-        var variableDefinitions = operation.getVariableDefinitions().stream()
-                .collect(Collectors.toMap(VariableDefinition::getName, variableDefinition -> variableDefinition));
 
-        String rootTypeName = switch (operation.getOperation()) {
-            case QUERY -> "Query";
-            case MUTATION -> "Mutation";
-            case SUBSCRIPTION -> "Subscription";
+        GraphQLObjectType rootType = switch (operation.getOperation()) {
+            case QUERY -> schema.getQueryType();
+            case MUTATION -> schema.getMutationType();
+            case SUBSCRIPTION -> schema.getSubscriptionType();
         };
-
-        GraphQLObjectType rootType = schema.getObjectType(rootTypeName);
         if (rootType == null) {
             return new UsageCoordinates(List.of(), List.of());
         }
@@ -106,8 +104,6 @@ final class ApiUsageDocumentAnalyzer {
                 fieldCoordinates,
                 inputUsageCoordinates,
                 fragments,
-                variableDefinitions,
-                variables,
                 schema,
                 new HashSet<>()
         );
@@ -120,8 +116,6 @@ final class ApiUsageDocumentAnalyzer {
             Set<String> fieldCoordinates,
             Set<InputUsageCoordinate> inputUsageCoordinates,
             Map<String, FragmentDefinition> fragments,
-            Map<String, VariableDefinition> variableDefinitions,
-            Map<String, @Nullable Object> variables,
             GraphQLSchema schema,
             Set<String> activeFragments
     ) {
@@ -137,8 +131,6 @@ final class ApiUsageDocumentAnalyzer {
                         fieldCoordinates,
                         inputUsageCoordinates,
                         fragments,
-                        variableDefinitions,
-                        variables,
                         schema,
                         activeFragments
                 );
@@ -148,8 +140,6 @@ final class ApiUsageDocumentAnalyzer {
                         fieldCoordinates,
                         inputUsageCoordinates,
                         fragments,
-                        variableDefinitions,
-                        variables,
                         schema,
                         activeFragments
                 );
@@ -160,8 +150,6 @@ final class ApiUsageDocumentAnalyzer {
                         fieldCoordinates,
                         inputUsageCoordinates,
                         fragments,
-                        variableDefinitions,
-                        variables,
                         schema,
                         activeFragments
                 );
@@ -175,8 +163,6 @@ final class ApiUsageDocumentAnalyzer {
             Set<String> fieldCoordinates,
             Set<InputUsageCoordinate> inputUsageCoordinates,
             Map<String, FragmentDefinition> fragments,
-            Map<String, VariableDefinition> variableDefinitions,
-            Map<String, @Nullable Object> variables,
             GraphQLSchema schema,
             Set<String> activeFragments
     ) {
@@ -197,9 +183,7 @@ final class ApiUsageDocumentAnalyzer {
                     fieldCoordinate,
                     field,
                     fieldDefinition,
-                    inputUsageCoordinates,
-                    variableDefinitions,
-                    variables
+                    inputUsageCoordinates
             );
         }
 
@@ -215,8 +199,6 @@ final class ApiUsageDocumentAnalyzer {
                     fieldCoordinates,
                     inputUsageCoordinates,
                     fragments,
-                    variableDefinitions,
-                    variables,
                     schema,
                     activeFragments
             );
@@ -228,8 +210,6 @@ final class ApiUsageDocumentAnalyzer {
             Set<String> fieldCoordinates,
             Set<InputUsageCoordinate> inputUsageCoordinates,
             Map<String, FragmentDefinition> fragments,
-            Map<String, VariableDefinition> variableDefinitions,
-            Map<String, @Nullable Object> variables,
             GraphQLSchema schema,
             Set<String> activeFragments
     ) {
@@ -251,8 +231,6 @@ final class ApiUsageDocumentAnalyzer {
                         fieldCoordinates,
                         inputUsageCoordinates,
                         fragments,
-                        variableDefinitions,
-                        variables,
                         schema,
                         activeFragments
                 );
@@ -268,8 +246,6 @@ final class ApiUsageDocumentAnalyzer {
             Set<String> fieldCoordinates,
             Set<InputUsageCoordinate> inputUsageCoordinates,
             Map<String, FragmentDefinition> fragments,
-            Map<String, VariableDefinition> variableDefinitions,
-            Map<String, @Nullable Object> variables,
             GraphQLSchema schema,
             Set<String> activeFragments
     ) {
@@ -280,8 +256,6 @@ final class ApiUsageDocumentAnalyzer {
                     fieldCoordinates,
                     inputUsageCoordinates,
                     fragments,
-                    variableDefinitions,
-                    variables,
                     schema,
                     activeFragments
             );
@@ -296,8 +270,6 @@ final class ApiUsageDocumentAnalyzer {
                     fieldCoordinates,
                     inputUsageCoordinates,
                     fragments,
-                    variableDefinitions,
-                    variables,
                     schema,
                     activeFragments
             );
@@ -308,9 +280,7 @@ final class ApiUsageDocumentAnalyzer {
             String fieldCoordinate,
             Field field,
             GraphQLFieldDefinition fieldDefinition,
-            Set<InputUsageCoordinate> inputUsageCoordinates,
-            Map<String, VariableDefinition> variableDefinitions,
-            Map<String, @Nullable Object> variables
+            Set<InputUsageCoordinate> inputUsageCoordinates
     ) {
         for (Argument argument : field.getArguments()) {
             GraphQLArgument argumentDefinition = fieldDefinition.getArgument(argument.getName());
@@ -324,9 +294,7 @@ final class ApiUsageDocumentAnalyzer {
             collectInputUsageFromAstValue(
                     argument.getValue(),
                     argumentDefinition.getType(),
-                    inputUsageCoordinates,
-                    variableDefinitions,
-                    variables
+                    inputUsageCoordinates
             );
         }
     }
@@ -334,48 +302,23 @@ final class ApiUsageDocumentAnalyzer {
     private static void collectInputUsageFromAstValue(
             Value<?> value,
             GraphQLInputType inputType,
-            Set<InputUsageCoordinate> inputUsageCoordinates,
-            Map<String, VariableDefinition> variableDefinitions,
-            Map<String, @Nullable Object> variables
+            Set<InputUsageCoordinate> inputUsageCoordinates
     ) {
-        if (value instanceof VariableReference variableReference) {
-            String variableName = variableReference.getName();
-            if (variables.containsKey(variableName)) {
-                collectInputUsageFromJavaValue(variables.get(variableName), inputType, inputUsageCoordinates);
-                return;
-            }
-            VariableDefinition variableDefinition = variableDefinitions.get(variableName);
-            if (variableDefinition != null && variableDefinition.getDefaultValue() != null) {
-                collectInputUsageFromAstValue(
-                        variableDefinition.getDefaultValue(),
-                        inputType,
-                        inputUsageCoordinates,
-                        variableDefinitions,
-                        variables
-                );
-            }
-            return;
-        }
-
-        GraphQLInputType unwrappedNonNull = unwrapNonNull(inputType);
+        GraphQLInputType unwrappedNonNull = inputTypeOf(GraphQLTypeUtil.unwrapNonNull(inputType));
         if (unwrappedNonNull instanceof GraphQLList listType) {
             if (value instanceof ArrayValue arrayValue) {
                 for (Value<?> nestedValue : arrayValue.getValues()) {
                     collectInputUsageFromAstValue(
                             nestedValue,
                             inputTypeOf(listType.getWrappedType()),
-                            inputUsageCoordinates,
-                            variableDefinitions,
-                            variables
+                            inputUsageCoordinates
                     );
                 }
             } else {
                 collectInputUsageFromAstValue(
                         value,
                         inputTypeOf(listType.getWrappedType()),
-                        inputUsageCoordinates,
-                        variableDefinitions,
-                        variables
+                        inputUsageCoordinates
                 );
             }
             return;
@@ -398,82 +341,9 @@ final class ApiUsageDocumentAnalyzer {
             collectInputUsageFromAstValue(
                     objectField.getValue(),
                     inputFieldDefinition.getType(),
-                    inputUsageCoordinates,
-                    variableDefinitions,
-                    variables
-            );
-        }
-    }
-
-    private static void collectInputUsageFromJavaValue(
-            @Nullable Object value,
-            GraphQLInputType inputType,
-            Set<InputUsageCoordinate> inputUsageCoordinates
-    ) {
-        if (value == null) {
-            return;
-        }
-
-        GraphQLInputType unwrappedNonNull = unwrapNonNull(inputType);
-        if (unwrappedNonNull instanceof GraphQLList listType) {
-            if (value instanceof Iterable<?> iterable) {
-                for (Object nestedValue : iterable) {
-                    collectInputUsageFromJavaValue(
-                            nestedValue,
-                            inputTypeOf(listType.getWrappedType()),
-                            inputUsageCoordinates
-                    );
-                }
-            } else if (value.getClass().isArray()) {
-                int length = java.lang.reflect.Array.getLength(value);
-                for (int i = 0; i < length; i++) {
-                    collectInputUsageFromJavaValue(
-                            java.lang.reflect.Array.get(value, i),
-                            inputTypeOf(listType.getWrappedType()),
-                            inputUsageCoordinates
-                    );
-                }
-            } else {
-                collectInputUsageFromJavaValue(
-                        value,
-                        inputTypeOf(listType.getWrappedType()),
-                        inputUsageCoordinates
-                );
-            }
-            return;
-        }
-
-        if (!(unwrappedNonNull instanceof GraphQLInputObjectType inputObjectType)
-                || !(value instanceof Map<?, ?> objectValue)) {
-            return;
-        }
-
-        for (var entry : objectValue.entrySet()) {
-            if (!(entry.getKey() instanceof String fieldName)) {
-                continue;
-            }
-            var inputFieldDefinition = inputObjectType.getFieldDefinition(fieldName);
-            if (inputFieldDefinition == null) {
-                continue;
-            }
-            inputUsageCoordinates.add(new InputUsageCoordinate(
-                    inputObjectType.getName() + "." + fieldName,
-                    InputUsageCoordinateKind.INPUT_OBJECT_FIELD
-            ));
-            collectInputUsageFromJavaValue(
-                    entry.getValue(),
-                    inputFieldDefinition.getType(),
                     inputUsageCoordinates
             );
         }
-    }
-
-    private static GraphQLInputType unwrapNonNull(GraphQLInputType inputType) {
-        GraphQLType type = inputType;
-        while (type instanceof GraphQLModifiedType modifiedType && GraphQLTypeUtil.isNonNull(type)) {
-            type = modifiedType.getWrappedType();
-        }
-        return inputTypeOf(type);
     }
 
     private static GraphQLInputType inputTypeOf(GraphQLType type) {

@@ -55,11 +55,11 @@ class ApiUsageDocumentAnalyzerTest {
                 "Query.viewer",
                 "User.id",
                 "User.name",
-                "User.status",
                 "User.profile",
-                "Profile.bio",
                 "Profile.avatar",
                 "Image.url",
+                "Profile.bio",
+                "User.status",
                 "User.friend"
         );
     }
@@ -138,15 +138,15 @@ class ApiUsageDocumentAnalyzerTest {
         assertThat(usage.fieldCoordinates()).containsExactly(
                 "Query.node",
                 "Node.id",
-                "User.name",
-                "User.status",
-                "Product.sku",
-                "Product.price",
                 "Product.owner",
                 "User.id",
+                "Product.price",
+                "Product.sku",
+                "User.name",
+                "User.status",
                 "Query.search",
-                "User.friend",
-                "Product.displayName"
+                "Product.displayName",
+                "User.friend"
         );
     }
 
@@ -176,9 +176,9 @@ class ApiUsageDocumentAnalyzerTest {
 
         assertThat(usage.fieldCoordinates()).containsExactly(
                 "Query.viewer",
-                "User.id",
                 "User.friend",
-                "User.name"
+                "User.name",
+                "User.id"
         );
     }
 
@@ -303,9 +303,9 @@ class ApiUsageDocumentAnalyzerTest {
         assertThat(usage.operationType()).isEqualTo("MUTATION");
         assertThat(usage.fieldCoordinates()).containsExactly(
                 "Mutation.updateUserStatus",
-                "User.status",
                 "User.profile",
-                "Profile.bio"
+                "Profile.bio",
+                "User.status"
         );
     }
 
@@ -335,14 +335,14 @@ class ApiUsageDocumentAnalyzerTest {
                 "Query.viewer(tags:)"
         );
         assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
-                "UserFilter.status",
                 "UserFilter.profile",
-                "ProfileFilter.bioContains",
                 "ProfileFilter.avatar",
                 "AvatarFilter.size",
-                "TagInput.value",
+                "ProfileFilter.bioContains",
+                "UserFilter.status",
                 "TagInput.metadata",
-                "TagMetadataInput.source"
+                "TagMetadataInput.source",
+                "TagInput.value"
         );
     }
 
@@ -368,14 +368,53 @@ class ApiUsageDocumentAnalyzerTest {
                 """, variables);
 
         assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.FIELD_ARGUMENT)).containsExactly(
-                "Query.search(text:)",
-                "Query.search(filter:)"
+                "Query.search(filter:)",
+                "Query.search(text:)"
         );
         assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
                 "SearchFilter.product",
-                "ProductFilter.sku",
-                "ProductFilter.minPrice"
+                "ProductFilter.minPrice",
+                "ProductFilter.sku"
         );
+    }
+
+    @Test
+    void analyze_operationSignatureIncludesSuppliedInputShape() {
+        var usageWithStatusOnly = analyze("InputShape", """
+                query InputShape {
+                  viewer(filter: { status: ACTIVE }) {
+                    id
+                  }
+                }
+                """);
+        var usageWithNestedProfile = analyze("InputShape", """
+                query InputShape {
+                  viewer(filter: { status: ACTIVE, profile: { bioContains: "hello" } }) {
+                    id
+                  }
+                }
+                """);
+
+        assertThat(usageWithStatusOnly.canonicalDocument())
+                .isNotEqualTo(usageWithNestedProfile.canonicalDocument());
+        assertThat(coordinatesOfKind(usageWithStatusOnly, InputUsageCoordinateKind.INPUT_OBJECT_FIELD))
+                .containsExactly("UserFilter.status");
+        assertThat(coordinatesOfKind(usageWithNestedProfile, InputUsageCoordinateKind.INPUT_OBJECT_FIELD))
+                .containsExactly("UserFilter.profile", "ProfileFilter.bioContains", "UserFilter.status");
+    }
+
+    @Test
+    void analyze_omitsAbsentVariableInputFieldsFromSignatureAndCoordinates() {
+        var usage = analyze("OptionalInput", """
+                query OptionalInput($filter: UserFilter) {
+                  viewer(filter: $filter) {
+                    id
+                  }
+                }
+                """);
+
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.FIELD_ARGUMENT)).isEmpty();
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).isEmpty();
     }
 
     @Test

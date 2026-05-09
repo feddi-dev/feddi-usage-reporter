@@ -12,7 +12,7 @@ jcstress {
 
 dependencies {
     api project(':feddi-api-usage-proto')
-    api 'com.graphql-java:graphql-java:0.0.0-2026-03-23T01-41-05-0e77994'
+    api 'com.graphql-java:graphql-java:0.0.0-2026-05-09T22-32-45-42e73c2'
     api 'io.projectreactor:reactor-core:3.8.4'
     api 'org.jspecify:jspecify:1.0.0'
 
