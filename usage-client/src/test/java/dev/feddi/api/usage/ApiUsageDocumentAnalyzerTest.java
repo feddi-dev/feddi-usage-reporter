@@ -1,5 +1,6 @@
 package dev.feddi.api.usage;
 
+import dev.feddi.api.usage.v1.InputUsageCoordinateKind;
 import graphql.parser.Parser;
 import graphql.schema.GraphQLSchema;
 import graphql.schema.idl.RuntimeWiring;
@@ -7,6 +8,9 @@ import graphql.schema.idl.SchemaGenerator;
 import graphql.schema.idl.SchemaParser;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -306,6 +310,97 @@ class ApiUsageDocumentAnalyzerTest {
     }
 
     @Test
+    void analyze_extractsFieldArgumentsAndInlineInputObjectFields() {
+        var usage = analyze("InputUsage", """
+                query InputUsage {
+                  viewer(
+                    filter: {
+                      status: ACTIVE
+                      profile: {
+                        bioContains: "hello"
+                        avatar: { size: 64 }
+                      }
+                    }
+                    tags: [
+                      { value: "internal", metadata: { source: "test" } }
+                    ]
+                  ) {
+                    id
+                  }
+                }
+                """);
+
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.FIELD_ARGUMENT)).containsExactly(
+                "Query.viewer(filter:)",
+                "Query.viewer(tags:)"
+        );
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
+                "UserFilter.status",
+                "UserFilter.profile",
+                "ProfileFilter.bioContains",
+                "ProfileFilter.avatar",
+                "AvatarFilter.size",
+                "TagInput.value",
+                "TagInput.metadata",
+                "TagMetadataInput.source"
+        );
+    }
+
+    @Test
+    void analyze_extractsInputObjectFieldsFromRuntimeVariables() {
+        var variables = new LinkedHashMap<String, Object>();
+        variables.put("term", "product");
+        var productFilter = new LinkedHashMap<String, Object>();
+        productFilter.put("sku", "SKU-1");
+        productFilter.put("minPrice", 100);
+        var searchFilter = new LinkedHashMap<String, Object>();
+        searchFilter.put("product", productFilter);
+        variables.put("filter", searchFilter);
+
+        var usage = analyze("SearchWithVariables", """
+                query SearchWithVariables($term: String!, $filter: SearchFilter) {
+                  search(text: $term, filter: $filter) {
+                    ... on Product {
+                      sku
+                    }
+                  }
+                }
+                """, variables);
+
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.FIELD_ARGUMENT)).containsExactly(
+                "Query.search(text:)",
+                "Query.search(filter:)"
+        );
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
+                "SearchFilter.product",
+                "ProductFilter.sku",
+                "ProductFilter.minPrice"
+        );
+    }
+
+    @Test
+    void analyze_reportsRepeatedInputUsageCoordinatesExactlyOnce() {
+        var usage = analyze("RepeatedInputUsage", """
+                query RepeatedInputUsage {
+                  first: viewer(filter: { status: ACTIVE }) {
+                    id
+                  }
+                  second: viewer(filter: { status: ACTIVE }) {
+                    id
+                  }
+                }
+                """);
+
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.FIELD_ARGUMENT)).containsExactly(
+                "Query.viewer(filter:)"
+        );
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
+                "UserFilter.status"
+        );
+        assertThat(usage.inputUsageCoordinates()).doesNotHaveDuplicates();
+    }
+
+    @Test
     void analyze_requiresOperationNameWhenDocumentContainsMultipleOperations() {
         assertThatThrownBy(() -> analyze(null, """
                 query Viewer {
@@ -327,11 +422,30 @@ class ApiUsageDocumentAnalyzerTest {
     }
 
     private ApiUsageDocumentAnalyzer.ProcessedUsage analyze(@Nullable String operationName, String documentBody) {
+        return analyze(operationName, documentBody, Map.of());
+    }
+
+    private ApiUsageDocumentAnalyzer.ProcessedUsage analyze(
+            @Nullable String operationName,
+            String documentBody,
+            Map<String, Object> variables
+    ) {
         return analyzer.analyze(ApiUsageInvocation.builder()
                 .document(Parser.parse(documentBody))
                 .operationName(operationName)
                 .schema(SCHEMA)
+                .variables(variables)
                 .build());
+    }
+
+    private static java.util.List<String> coordinatesOfKind(
+            ApiUsageDocumentAnalyzer.ProcessedUsage usage,
+            InputUsageCoordinateKind kind
+    ) {
+        return usage.inputUsageCoordinates().stream()
+                .filter(coordinate -> coordinate.kind() == kind)
+                .map(ApiUsageDocumentAnalyzer.InputUsageCoordinate::coordinate)
+                .toList();
     }
 
     private static GraphQLSchema schema() {
@@ -351,15 +465,52 @@ class ApiUsageDocumentAnalyzerTest {
 
                 union SearchResult = User | Product
 
-                type Query {
-                  viewer: User!
-                  node(id: ID!): Node
-                  search(text: String): [SearchResult!]!
-                }
+	                type Query {
+	                  viewer(filter: UserFilter, tags: [TagInput!]): User!
+	                  node(id: ID!): Node
+	                  search(text: String, filter: SearchFilter): [SearchResult!]!
+	                }
 
-                type Mutation {
-                  updateUserStatus(id: ID!, status: UserStatus!): User
-                }
+	                type Mutation {
+	                  updateUserStatus(id: ID!, status: UserStatus!, input: UpdateUserInput): User
+	                }
+
+	                input UserFilter {
+	                  status: UserStatus
+	                  profile: ProfileFilter
+	                }
+
+	                input ProfileFilter {
+	                  bioContains: String
+	                  avatar: AvatarFilter
+	                }
+
+	                input AvatarFilter {
+	                  size: Int
+	                }
+
+	                input TagInput {
+	                  value: String!
+	                  metadata: TagMetadataInput
+	                }
+
+	                input TagMetadataInput {
+	                  source: String
+	                }
+
+	                input SearchFilter {
+	                  product: ProductFilter
+	                }
+
+	                input ProductFilter {
+	                  sku: String
+	                  minPrice: Int
+	                }
+
+	                input UpdateUserInput {
+	                  status: UserStatus!
+	                  profile: ProfileFilter
+	                }
 
                 type Subscription {
                   userEvents: User

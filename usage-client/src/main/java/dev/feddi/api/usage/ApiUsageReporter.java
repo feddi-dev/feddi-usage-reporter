@@ -2,6 +2,7 @@ package dev.feddi.api.usage;
 
 import com.google.protobuf.Timestamp;
 import dev.feddi.api.usage.http.ReactiveHttpClient;
+import dev.feddi.api.usage.v1.InputUsageCoordinate;
 import dev.feddi.api.usage.v1.UsageRecord;
 import dev.feddi.api.usage.v1.UsageReportRequest;
 import dev.feddi.api.usage.v1.UsageReportResponse;
@@ -29,9 +30,10 @@ import java.util.function.DoubleSupplier;
  * with the parsed GraphQL Java {@link graphql.language.Document}, operation name, executable
  * {@link graphql.schema.GraphQLSchema}, timing, and error metadata.
  *
- * <p>The reporter derives the canonical operation document and field coordinates locally, batches
- * records in memory, and sends protobuf batches to the platform. The platform calculates the
- * operation hash from the canonical document on ingest.
+     * <p>The reporter derives the canonical operation document, field coordinates, field argument
+     * coordinates, and input object field coordinates locally, batches records in memory, and sends
+     * protobuf batches to the platform. The platform calculates the operation hash from the canonical
+     * document on ingest.
  *
  * <p>HTTP transport is deliberately pluggable. Applications provide a {@link ReactiveHttpClient}
  * implementation, usually backed by the HTTP client they already use. The default host is
@@ -256,6 +258,12 @@ public final class ApiUsageReporter implements AutoCloseable {
                 .setOperationType(usage.operationType())
                 .setCanonicalDocument(usage.canonicalDocument())
                 .addAllFieldCoordinates(usage.fieldCoordinates())
+                .addAllInputUsageCoordinates(usage.inputUsageCoordinates().stream()
+                        .map(inputUsage -> InputUsageCoordinate.newBuilder()
+                                .setCoordinate(inputUsage.coordinate())
+                                .setKind(inputUsage.kind())
+                                .build())
+                        .toList())
                 .setDurationNanos(invocation.durationNanos())
                 .setHttpError(invocation.httpError())
                 .setGraphqlError(invocation.graphqlError())

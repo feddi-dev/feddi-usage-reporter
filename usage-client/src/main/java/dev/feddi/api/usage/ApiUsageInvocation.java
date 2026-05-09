@@ -5,6 +5,9 @@ import graphql.schema.GraphQLSchema;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Instant;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 
 public final class ApiUsageInvocation {
@@ -18,6 +21,7 @@ public final class ApiUsageInvocation {
     private final String clientName;
     private final String clientVersion;
     private final Instant timestamp;
+    private final Map<String, @Nullable Object> variables;
 
     private ApiUsageInvocation(Builder builder) {
         this.document = Objects.requireNonNull(builder.document, "document");
@@ -29,6 +33,7 @@ public final class ApiUsageInvocation {
         this.clientName = nullToEmpty(builder.clientName);
         this.clientVersion = nullToEmpty(builder.clientVersion);
         this.timestamp = builder.timestamp != null ? builder.timestamp : Instant.now();
+        this.variables = immutableCopy(builder.variables);
     }
 
     public static Builder builder() {
@@ -71,12 +76,23 @@ public final class ApiUsageInvocation {
         return timestamp;
     }
 
+    public Map<String, @Nullable Object> variables() {
+        return variables;
+    }
+
     private static @Nullable String blankToNull(@Nullable String value) {
         return value == null || value.isBlank() ? null : value;
     }
 
     private static String nullToEmpty(@Nullable String value) {
         return value == null ? "" : value;
+    }
+
+    private static Map<String, @Nullable Object> immutableCopy(@Nullable Map<String, @Nullable Object> variables) {
+        if (variables == null || variables.isEmpty()) {
+            return Map.of();
+        }
+        return Collections.unmodifiableMap(new LinkedHashMap<>(variables));
     }
 
     public static final class Builder {
@@ -90,6 +106,7 @@ public final class ApiUsageInvocation {
         private @Nullable String clientName;
         private @Nullable String clientVersion;
         private @Nullable Instant timestamp;
+        private @Nullable Map<String, @Nullable Object> variables;
 
         private Builder() {
         }
@@ -136,6 +153,11 @@ public final class ApiUsageInvocation {
 
         public Builder timestamp(@Nullable Instant timestamp) {
             this.timestamp = timestamp;
+            return this;
+        }
+
+        public Builder variables(@Nullable Map<String, @Nullable Object> variables) {
+            this.variables = variables;
             return this;
         }
 
