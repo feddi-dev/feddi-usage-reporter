@@ -24,6 +24,18 @@ message UsageRecord {
   string client_version = 9;
   google.protobuf.Timestamp timestamp = 10;
   optional int32 multiplier = 11;
+  repeated InputUsageCoordinate input_usage_coordinates = 12;
+}
+
+message InputUsageCoordinate {
+  string coordinate = 1;
+  InputUsageCoordinateKind kind = 2;
+}
+
+enum InputUsageCoordinateKind {
+  INPUT_USAGE_COORDINATE_KIND_UNSPECIFIED = 0;
+  FIELD_ARGUMENT = 1;
+  INPUT_OBJECT_FIELD = 2;
 }
 
 message UsageReportResponse {

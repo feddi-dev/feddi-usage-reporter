@@ -137,6 +137,43 @@ class ApiUsageReporterTest {
     }
 
     @Test
+    void flushNow_sendsInputUsageCoordinates() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        var reporter = reporterBuilder(httpClient)
+                .maxBatchSize(100)
+                .build();
+
+        assertThat(reporter.report(invocation(
+                "GetUser",
+                """
+                query GetUser($filter: UserFilter) {
+                  user(id: "1", filter: $filter) {
+                    id
+                  }
+                }
+                """,
+                Map.of("filter", Map.of(
+                        "name", "Ada",
+                        "friend", Map.of("name", "Grace")
+                ))
+        ))).isTrue();
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        var record = httpClient.usageRequest(0).getRecords(0);
+        assertThat(record.getInputUsageCoordinatesList())
+                .extracting(coordinate -> coordinate.getKind() + ":" + coordinate.getCoordinate())
+                .containsExactlyInAnyOrder(
+                        "FIELD_ARGUMENT:Query.user(id:)",
+                        "FIELD_ARGUMENT:Query.user(filter:)",
+                        "INPUT_OBJECT_FIELD:UserFilter.name",
+                        "INPUT_OBJECT_FIELD:UserFilter.friend"
+                );
+    }
+
+    @Test
     void report_dropsWhenQueueIsFull() {
         var httpClient = new InMemoryReactiveHttpClient();
         var reporter = reporterBuilder(httpClient)
@@ -546,11 +583,20 @@ class ApiUsageReporterTest {
     }
 
     private static ApiUsageInvocation invocation(String operationName, String documentBody) {
+        return invocation(operationName, documentBody, Map.of());
+    }
+
+    private static ApiUsageInvocation invocation(
+            String operationName,
+            String documentBody,
+            Map<String, Object> variables
+    ) {
         Document document = Parser.parse(documentBody);
         return ApiUsageInvocation.builder()
                 .document(document)
                 .operationName(operationName)
                 .schema(schema())
+                .variables(variables)
                 .durationNanos(1_500_000)
                 .clientName("web-app")
                 .clientVersion("1.2.0")
@@ -568,11 +614,16 @@ class ApiUsageReporterTest {
 
     private static GraphQLSchema schema() {
         var registry = new SchemaParser().parse("""
-                type Query {
-                  user: User
-                }
+	                type Query {
+	                  user(id: ID, filter: UserFilter): User
+	                }
 
-                type User {
+	                input UserFilter {
+	                  name: String
+	                  friend: UserFilter
+	                }
+
+	                type User {
                   id: ID!
                   name: String!
                   friend: User

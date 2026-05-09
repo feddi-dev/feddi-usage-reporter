@@ -1,6 +1,8 @@
 package dev.feddi.api.usage;
 
 import com.google.protobuf.Timestamp;
+import dev.feddi.api.usage.v1.InputUsageCoordinate;
+import dev.feddi.api.usage.v1.InputUsageCoordinateKind;
 import dev.feddi.api.usage.v1.UsageRecord;
 import dev.feddi.api.usage.v1.UsageReportRequest;
 import org.junit.jupiter.api.Test;
@@ -22,6 +24,14 @@ class UsageReportProtoTest {
                         .setCanonicalDocument("query GetUser { user { id name } }")
                         .addFieldCoordinates("Query.user")
                         .addFieldCoordinates("User.id")
+                        .addInputUsageCoordinates(InputUsageCoordinate.newBuilder()
+                                .setCoordinate("Query.user(id:)")
+                                .setKind(InputUsageCoordinateKind.FIELD_ARGUMENT)
+                                .build())
+                        .addInputUsageCoordinates(InputUsageCoordinate.newBuilder()
+                                .setCoordinate("UserFilter.status")
+                                .setKind(InputUsageCoordinateKind.INPUT_OBJECT_FIELD)
+                                .build())
                         .setDurationNanos(1_500_000)
                         .setHttpError(false)
                         .setGraphqlError(true)
@@ -43,6 +53,10 @@ class UsageReportProtoTest {
         assertEquals("query GetUser { user { id name } }", record.getCanonicalDocument());
         assertEquals("Query.user", record.getFieldCoordinates(0));
         assertEquals("User.id", record.getFieldCoordinates(1));
+        assertEquals("Query.user(id:)", record.getInputUsageCoordinates(0).getCoordinate());
+        assertEquals(InputUsageCoordinateKind.FIELD_ARGUMENT, record.getInputUsageCoordinates(0).getKind());
+        assertEquals("UserFilter.status", record.getInputUsageCoordinates(1).getCoordinate());
+        assertEquals(InputUsageCoordinateKind.INPUT_OBJECT_FIELD, record.getInputUsageCoordinates(1).getKind());
         assertEquals(1_500_000, record.getDurationNanos());
         assertTrue(record.getGraphqlError());
         assertEquals("web-app", record.getClientName());

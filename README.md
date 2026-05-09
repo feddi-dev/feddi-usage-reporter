@@ -18,7 +18,8 @@ deployments can override the host, but the endpoint path is always
 
 `ApiUsageReporter` receives a GraphQL Java `Document`, operation name, and
 `GraphQLSchema` for each completed API call. It generates the canonical
-operation document with `AstSignature`, extracts field coordinates, samples
+operation document with `AstSignature`, extracts field coordinates, field
+argument coordinates, and input object field coordinates, samples
 high-throughput traffic, and periodically flushes protobuf batches to the
 feddi Platform.
 
@@ -94,6 +95,10 @@ Report each completed GraphQL request after execution. The `Document` should be
 the parsed GraphQL Java document for the request, and the `GraphQLSchema`
 should be the executable schema used to run it.
 
+Pass the runtime variables map when the operation used variables. This lets the
+reporter detect which optional input object fields were actually present in the
+request. Inline input object literals are analyzed from the GraphQL document.
+
 ```java
 import dev.feddi.api.usage.ApiUsageInvocation;
 
@@ -105,6 +110,7 @@ boolean queued = reporter.report(ApiUsageInvocation.builder()
         .document(document)
         .operationName(operationName)
         .schema(graphQLSchema)
+        .variables(variables)
         .durationNanos(System.nanoTime() - startedAt)
         .httpError(httpStatusCode >= 500)
         .graphqlError(!executionResult.getErrors().isEmpty())
