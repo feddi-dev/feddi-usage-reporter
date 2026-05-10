@@ -40,9 +40,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-final class ApiUsageDocumentAnalyzer {
+public final class ApiUsageDocumentAnalyzer {
 
-    ProcessedUsage analyze(ApiUsageInvocation invocation) {
+    public ProcessedUsage analyze(ApiUsageInvocation invocation) {
         var operation = findOperation(invocation.document(), invocation.operationName());
         var normalized = new AstSignature().signatureQuery(invocation.document(), invocation.operationName());
         var canonicalDocument = AstPrinter.printAstCompact(normalized);
@@ -489,7 +489,7 @@ final class ApiUsageDocumentAnalyzer {
                 || type instanceof GraphQLUnionType;
     }
 
-    record ProcessedUsage(
+    public record ProcessedUsage(
             @Nullable String operationName,
             String operationType,
             String canonicalDocument,
@@ -498,7 +498,7 @@ final class ApiUsageDocumentAnalyzer {
     ) {
     }
 
-    record InputUsageCoordinate(
+    public record InputUsageCoordinate(
             String coordinate,
             InputUsageCoordinateKind kind
     ) {
