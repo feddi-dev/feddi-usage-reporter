@@ -36,6 +36,8 @@ enum InputUsageCoordinateKind {
   INPUT_USAGE_COORDINATE_KIND_UNSPECIFIED = 0;
   FIELD_ARGUMENT = 1;
   INPUT_OBJECT_FIELD = 2;
+  USED_DIRECTIVE = 3;
+  DIRECTIVE_ARGUMENT = 4;
 }
 
 message UsageReportResponse {

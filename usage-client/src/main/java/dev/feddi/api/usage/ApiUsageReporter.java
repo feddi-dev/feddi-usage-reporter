@@ -30,10 +30,10 @@ import java.util.function.DoubleSupplier;
  * with the parsed GraphQL Java {@link graphql.language.Document}, operation name, executable
  * {@link graphql.schema.GraphQLSchema}, timing, and error metadata.
  *
-     * <p>The reporter derives the canonical operation document, field coordinates, field argument
-     * coordinates, and input object field coordinates locally, batches records in memory, and sends
-     * protobuf batches to the platform. The platform calculates the operation hash from the canonical
-     * document on ingest.
+ * <p>The reporter derives the canonical operation document, field coordinates, field argument
+ * coordinates, used directives, directive argument coordinates, and input object field coordinates
+ * locally, batches records in memory, and sends protobuf batches to the platform. The platform
+ * calculates the operation hash from the canonical document on ingest.
  *
  * <p>HTTP transport is deliberately pluggable. Applications provide a {@link ReactiveHttpClient}
  * implementation, usually backed by the HTTP client they already use. The default host is

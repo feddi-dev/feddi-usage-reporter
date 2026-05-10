@@ -52,15 +52,15 @@ class ApiUsageDocumentAnalyzerTest {
         assertThat(usage.operationType()).isEqualTo("QUERY");
         assertThat(usage.canonicalDocument()).isNotBlank();
         assertThat(usage.fieldCoordinates()).containsExactly(
+                "Image.url",
+                "Profile.avatar",
+                "Profile.bio",
                 "Query.viewer",
+                "User.friend",
                 "User.id",
                 "User.name",
                 "User.profile",
-                "Profile.avatar",
-                "Image.url",
-                "Profile.bio",
-                "User.status",
-                "User.friend"
+                "User.status"
         );
     }
 
@@ -86,12 +86,12 @@ class ApiUsageDocumentAnalyzerTest {
                 """);
 
         assertThat(usage.fieldCoordinates()).containsExactly(
-                "Query.viewer",
-                "User.id",
-                "User.profile",
                 "Profile.bio",
+                "Query.viewer",
                 "User.friend",
-                "User.name"
+                "User.id",
+                "User.name",
+                "User.profile"
         );
     }
 
@@ -136,17 +136,17 @@ class ApiUsageDocumentAnalyzerTest {
                 """);
 
         assertThat(usage.fieldCoordinates()).containsExactly(
-                "Query.node",
                 "Node.id",
+                "Product.displayName",
                 "Product.owner",
-                "User.id",
                 "Product.price",
                 "Product.sku",
-                "User.name",
-                "User.status",
+                "Query.node",
                 "Query.search",
-                "Product.displayName",
-                "User.friend"
+                "User.friend",
+                "User.id",
+                "User.name",
+                "User.status"
         );
     }
 
@@ -177,8 +177,8 @@ class ApiUsageDocumentAnalyzerTest {
         assertThat(usage.fieldCoordinates()).containsExactly(
                 "Query.viewer",
                 "User.friend",
-                "User.name",
-                "User.id"
+                "User.id",
+                "User.name"
         );
     }
 
@@ -219,11 +219,11 @@ class ApiUsageDocumentAnalyzerTest {
                 """);
 
         assertThat(usage.fieldCoordinates()).containsExactly(
+                "Profile.bio",
                 "Query.viewer",
                 "User.id",
                 "User.name",
-                "User.profile",
-                "Profile.bio"
+                "User.profile"
         );
         assertThat(usage.fieldCoordinates()).doesNotHaveDuplicates();
     }
@@ -270,12 +270,12 @@ class ApiUsageDocumentAnalyzerTest {
                 """);
 
         assertThat(usage.fieldCoordinates()).containsExactly(
-                "Query.node",
                 "Node.id",
-                "User.id",
-                "User.name",
+                "Product.displayName",
+                "Query.node",
                 "Query.search",
-                "Product.displayName"
+                "User.id",
+                "User.name"
         );
         assertThat(usage.fieldCoordinates()).doesNotHaveDuplicates();
     }
@@ -303,8 +303,8 @@ class ApiUsageDocumentAnalyzerTest {
         assertThat(usage.operationType()).isEqualTo("MUTATION");
         assertThat(usage.fieldCoordinates()).containsExactly(
                 "Mutation.updateUserStatus",
-                "User.profile",
                 "Profile.bio",
+                "User.profile",
                 "User.status"
         );
     }
@@ -335,14 +335,14 @@ class ApiUsageDocumentAnalyzerTest {
                 "Query.viewer(tags:)"
         );
         assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
-                "UserFilter.profile",
-                "ProfileFilter.avatar",
                 "AvatarFilter.size",
+                "ProfileFilter.avatar",
                 "ProfileFilter.bioContains",
-                "UserFilter.status",
                 "TagInput.metadata",
+                "TagInput.value",
                 "TagMetadataInput.source",
-                "TagInput.value"
+                "UserFilter.profile",
+                "UserFilter.status"
         );
     }
 
@@ -372,9 +372,44 @@ class ApiUsageDocumentAnalyzerTest {
                 "Query.search(text:)"
         );
         assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
-                "SearchFilter.product",
                 "ProductFilter.minPrice",
-                "ProductFilter.sku"
+                "ProductFilter.sku",
+                "SearchFilter.product"
+        );
+    }
+
+    @Test
+    void analyze_extractsUsedDirectivesAndDirectiveArguments() {
+        var variables = new LinkedHashMap<String, Object>();
+        variables.put("includeViewer", true);
+        variables.put("meta", Map.of(
+                "profile", Map.of("bioContains", "hello")
+        ));
+
+        var usage = analyze("DirectiveUsage", """
+                query DirectiveUsage(
+                  $includeViewer: Boolean!
+                  $meta: UserFilter @usageMeta(meta: { status: ACTIVE })
+                ) @usageMeta(meta: { status: ACTIVE }, enabled: true) {
+                  viewer @include(if: $includeViewer) @usageMeta(meta: $meta) {
+                    id
+                  }
+                }
+                """, variables);
+
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.USED_DIRECTIVE)).containsExactly(
+                "@include",
+                "@usageMeta"
+        );
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.DIRECTIVE_ARGUMENT)).containsExactly(
+                "@include(if:)",
+                "@usageMeta(enabled:)",
+                "@usageMeta(meta:)"
+        );
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
+                "ProfileFilter.bioContains",
+                "UserFilter.profile",
+                "UserFilter.status"
         );
     }
 
@@ -400,7 +435,7 @@ class ApiUsageDocumentAnalyzerTest {
         assertThat(coordinatesOfKind(usageWithStatusOnly, InputUsageCoordinateKind.INPUT_OBJECT_FIELD))
                 .containsExactly("UserFilter.status");
         assertThat(coordinatesOfKind(usageWithNestedProfile, InputUsageCoordinateKind.INPUT_OBJECT_FIELD))
-                .containsExactly("UserFilter.profile", "ProfileFilter.bioContains", "UserFilter.status");
+                .containsExactly("ProfileFilter.bioContains", "UserFilter.profile", "UserFilter.status");
     }
 
     @Test
@@ -489,6 +524,8 @@ class ApiUsageDocumentAnalyzerTest {
 
     private static GraphQLSchema schema() {
         var registry = new SchemaParser().parse("""
+                directive @usageMeta(meta: UserFilter, enabled: Boolean) on QUERY | FIELD | VARIABLE_DEFINITION | FRAGMENT_SPREAD | INLINE_FRAGMENT
+
                 interface Node {
                   id: ID!
                 }

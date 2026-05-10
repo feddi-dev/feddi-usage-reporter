@@ -125,9 +125,9 @@ class ApiUsageReporterTest {
         assertThat(record.getCanonicalDocument()).isNotBlank();
         assertThat(record.getFieldCoordinatesList()).containsExactly(
                 "Query.user",
+                "User.friend",
                 "User.id",
-                "User.name",
-                "User.friend"
+                "User.name"
         );
         assertThat(record.getDurationNanos()).isEqualTo(1_500_000);
         assertThat(record.getClientName()).isEqualTo("web-app");

@@ -32,6 +32,14 @@ class UsageReportProtoTest {
                                 .setCoordinate("UserFilter.status")
                                 .setKind(InputUsageCoordinateKind.INPUT_OBJECT_FIELD)
                                 .build())
+                        .addInputUsageCoordinates(InputUsageCoordinate.newBuilder()
+                                .setCoordinate("@include")
+                                .setKind(InputUsageCoordinateKind.USED_DIRECTIVE)
+                                .build())
+                        .addInputUsageCoordinates(InputUsageCoordinate.newBuilder()
+                                .setCoordinate("@include(if:)")
+                                .setKind(InputUsageCoordinateKind.DIRECTIVE_ARGUMENT)
+                                .build())
                         .setDurationNanos(1_500_000)
                         .setHttpError(false)
                         .setGraphqlError(true)
@@ -57,6 +65,10 @@ class UsageReportProtoTest {
         assertEquals(InputUsageCoordinateKind.FIELD_ARGUMENT, record.getInputUsageCoordinates(0).getKind());
         assertEquals("UserFilter.status", record.getInputUsageCoordinates(1).getCoordinate());
         assertEquals(InputUsageCoordinateKind.INPUT_OBJECT_FIELD, record.getInputUsageCoordinates(1).getKind());
+        assertEquals("@include", record.getInputUsageCoordinates(2).getCoordinate());
+        assertEquals(InputUsageCoordinateKind.USED_DIRECTIVE, record.getInputUsageCoordinates(2).getKind());
+        assertEquals("@include(if:)", record.getInputUsageCoordinates(3).getCoordinate());
+        assertEquals(InputUsageCoordinateKind.DIRECTIVE_ARGUMENT, record.getInputUsageCoordinates(3).getKind());
         assertEquals(1_500_000, record.getDurationNanos());
         assertTrue(record.getGraphqlError());
         assertEquals("web-app", record.getClientName());
