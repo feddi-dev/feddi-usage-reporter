@@ -3,7 +3,8 @@ package dev.feddi.api.usage;
 import dev.feddi.api.usage.http.ReactiveHttpClient;
 import dev.feddi.api.usage.http.ReactiveHttpRequest;
 import dev.feddi.api.usage.http.ReactiveHttpResponse;
-import dev.feddi.api.usage.v1.UsageReportRequest;
+import dev.feddi.api.usage.v1.IngestUsageRequest;
+import dev.feddi.api.usage.v1.RegisterOperationsRequest;
 import dev.feddi.api.usage.v1.UsageReportResponse;
 import graphql.language.Document;
 import graphql.parser.Parser;
@@ -15,6 +16,8 @@ import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
@@ -27,6 +30,7 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.DoubleSupplier;
+import java.util.zip.GZIPInputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -64,7 +68,7 @@ class ApiUsageReporterTest {
                 .verifyComplete();
 
         assertThat(reporter.getPendingQueueSize()).isZero();
-        assertThat(httpClient.requests()).hasSize(1);
+        assertThat(httpClient.requests()).hasSize(2);
     }
 
     @Test
@@ -112,27 +116,35 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
                 .verifyComplete();
 
-        var httpRequest = httpClient.requests().getFirst();
-        assertThat(httpRequest.method()).isEqualTo("POST");
-        assertThat(httpRequest.uri()).isEqualTo(URI.create("https://feddi.dev/api/usage-proto"));
-        assertThat(httpRequest.headers()).containsEntry("Authorization", List.of("Bearer fddi_test_key"));
-        assertThat(httpRequest.headers()).containsEntry("Content-Type", List.of("application/x-protobuf"));
-        assertThat(httpRequest.headers()).containsEntry("Accept", List.of("application/x-protobuf"));
+        var operationHttpRequest = httpClient.requests().getFirst();
+        assertThat(operationHttpRequest.method()).isEqualTo("POST");
+        assertThat(operationHttpRequest.uri()).isEqualTo(URI.create("https://feddi.dev/api/usage-proto/operations"));
+        assertThat(operationHttpRequest.headers()).containsEntry("Authorization", List.of("Bearer fddi_test_key"));
+        assertThat(operationHttpRequest.headers()).containsEntry("Content-Type", List.of("application/x-protobuf"));
+        assertThat(operationHttpRequest.headers()).containsEntry("Content-Encoding", List.of("gzip"));
+        assertThat(operationHttpRequest.headers()).containsEntry("Accept", List.of("application/x-protobuf"));
 
-        var record = httpClient.usageRequest(0).getRecords(0);
-        assertThat(record.getOperationName()).isEqualTo("GetUser");
-        assertThat(record.getOperationType()).isEqualTo("QUERY");
-        assertThat(record.getCanonicalDocument()).isNotBlank();
-        assertThat(record.getFieldCoordinatesList()).containsExactly(
+        var usageHttpRequest = httpClient.requests().get(1);
+        assertThat(usageHttpRequest.uri()).isEqualTo(URI.create("https://feddi.dev/api/usage-proto/usage"));
+        assertThat(usageHttpRequest.headers()).containsEntry("Content-Encoding", List.of("gzip"));
+
+        var operation = httpClient.operationRequest(0).getOperations(0);
+        assertThat(operation.getOperationName()).isEqualTo("GetUser");
+        assertThat(operation.getOperationType()).isEqualTo("QUERY");
+        assertThat(operation.getOperationHash()).isNotBlank();
+        assertThat(operation.getCanonicalDocument()).isNotBlank();
+        assertThat(operation.getFieldCoordinatesList()).containsExactly(
                 "Query.user",
                 "User.friend",
                 "User.id",
                 "User.name"
         );
-        assertThat(record.getDurationNanos()).isEqualTo(1_500_000);
-        assertThat(record.getClientName()).isEqualTo("web-app");
-        assertThat(record.getClientVersion()).isEqualTo("1.2.0");
-        assertThat(record.getTimestamp().getSeconds())
+        var event = httpClient.usageRequest(0).getEvents(0);
+        assertThat(event.getOperationHash()).isEqualTo(operation.getOperationHash());
+        assertThat(event.getDurationNanos()).isEqualTo(1_500_000);
+        assertThat(event.getClientName()).isEqualTo("web-app");
+        assertThat(event.getClientVersion()).isEqualTo("1.2.0");
+        assertThat(event.getTimestamp().getSeconds())
                 .isEqualTo(Instant.parse("2026-03-22T10:00:00Z").getEpochSecond());
     }
 
@@ -162,8 +174,8 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
                 .verifyComplete();
 
-        var record = httpClient.usageRequest(0).getRecords(0);
-        assertThat(record.getInputUsageCoordinatesList())
+        var operation = httpClient.operationRequest(0).getOperations(0);
+        assertThat(operation.getInputUsageCoordinatesList())
                 .extracting(coordinate -> coordinate.getKind() + ":" + coordinate.getCoordinate())
                 .containsExactlyInAnyOrder(
                         "FIELD_ARGUMENT:Query.user(id:)",
@@ -205,7 +217,7 @@ class ApiUsageReporterTest {
 
             scheduler.runUntilIdle();
 
-            assertThat(httpClient.usageRequest(0).getRecordsCount()).isEqualTo(2);
+            assertThat(httpClient.usageRequest(0).getEventsCount()).isEqualTo(2);
             assertThat(reporter.getPendingQueueSize()).isZero();
         } finally {
             reporter.close();
@@ -227,14 +239,14 @@ class ApiUsageReporterTest {
             assertThat(reporter.report(invocation("query GetUser { user { friend { id } } }"))).isTrue();
 
             scheduler.runUntilIdle();
-            assertThat(httpClient.usageRequest(0).getRecordsCount()).isEqualTo(2);
+            assertThat(httpClient.usageRequest(0).getEventsCount()).isEqualTo(2);
 
             StepVerifier.create(reporter.flushNow())
                     .expectNextCount(1)
                     .verifyComplete();
 
             var recordCounts = httpClient.usageRequests().stream()
-                    .map(UsageReportRequest::getRecordsCount)
+                    .map(IngestUsageRequest::getEventsCount)
                     .toList();
             assertThat(recordCounts).allMatch(recordCount -> recordCount <= 2);
             assertThat(recordCounts.stream().mapToInt(Integer::intValue).sum()).isEqualTo(3);
@@ -268,7 +280,7 @@ class ApiUsageReporterTest {
 
             scheduler.advanceBy(Duration.ofSeconds(1));
 
-            assertThat(httpClient.usageRequest(0).getRecordsCount()).isEqualTo(1);
+            assertThat(httpClient.usageRequest(0).getEventsCount()).isEqualTo(1);
             assertThat(reporter.getPendingQueueSize()).isZero();
         } finally {
             reporter.close();
@@ -307,7 +319,7 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
                 .verifyComplete();
 
-        var sampledRecord = httpClient.usageRequest(1).getRecords(0);
+        var sampledRecord = httpClient.usageRequest(1).getEvents(0);
         assertThat(sampledRecord.hasMultiplier()).isTrue();
         assertThat(sampledRecord.getMultiplier()).isEqualTo(10);
     }
@@ -335,7 +347,7 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
                 .verifyComplete();
 
-        assertThat(httpClient.usageRequest(1).getRecords(0).hasMultiplier()).isFalse();
+        assertThat(httpClient.usageRequest(1).getEvents(0).hasMultiplier()).isFalse();
     }
 
     @Test
@@ -363,7 +375,7 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
                 .verifyComplete();
 
-        assertThat(httpClient.usageRequest(1).getRecords(0).getMultiplier()).isEqualTo(10);
+        assertThat(httpClient.usageRequest(1).getEvents(0).getMultiplier()).isEqualTo(10);
     }
 
     @Test
@@ -391,7 +403,7 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
                 .verifyComplete();
 
-        assertThat(httpClient.usageRequest(1).getRecords(0).getMultiplier()).isEqualTo(100);
+        assertThat(httpClient.usageRequest(1).getEvents(0).getMultiplier()).isEqualTo(100);
     }
 
     @Test
@@ -419,7 +431,7 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
                 .verifyComplete();
 
-        assertThat(httpClient.usageRequest(1).getRecords(0).getMultiplier()).isEqualTo(1000);
+        assertThat(httpClient.usageRequest(1).getEvents(0).getMultiplier()).isEqualTo(1000);
     }
 
     @Test
@@ -472,7 +484,7 @@ class ApiUsageReporterTest {
 
             scheduler.runUntilIdle();
 
-            assertThat(httpClient.requests()).hasSize(1);
+            assertThat(httpClient.requests()).hasSize(2);
             assertThat(errors.getFirst())
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("network down");
@@ -485,6 +497,7 @@ class ApiUsageReporterTest {
     @Test
     void flushNowPropagatesHttpErrorsToCaller() {
         var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueStatus(200);
         httpClient.enqueueStatus(503);
         var reporter = reporterBuilder(httpClient)
                 .maxBatchSize(100)
@@ -514,8 +527,102 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
                 .verifyComplete();
 
-        assertThat(httpClient.usageRequest(0).getRecordsCount()).isEqualTo(1);
+        assertThat(httpClient.usageRequest(0).getEventsCount()).isEqualTo(1);
         assertThat(reporter.report(invocation("query GetUser { user { name } }"))).isFalse();
+    }
+
+    @Test
+    void successfulOperationRegistrationCachesHashAndSkipsRepeatedRegistration() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        var reporter = reporterBuilder(httpClient)
+                .maxBatchSize(100)
+                .build();
+
+        assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+        StepVerifier.create(reporter.flushNow())
+                .expectNextCount(1)
+                .verifyComplete();
+
+        assertThat(reporter.getKnownOperationCacheSize()).isEqualTo(1);
+        assertThat(httpClient.operationRequests()).hasSize(1);
+        assertThat(httpClient.usageRequests()).hasSize(1);
+
+        assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+        StepVerifier.create(reporter.flushNow())
+                .expectNextCount(1)
+                .verifyComplete();
+
+        assertThat(httpClient.operationRequests()).hasSize(1);
+        assertThat(httpClient.usageRequests()).hasSize(2);
+    }
+
+    @Test
+    void failedOperationRegistrationIsRetriedAndDoesNotBlockUsage() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueStatus(503);
+        var errors = new CopyOnWriteArrayList<Throwable>();
+        var reporter = reporterBuilder(httpClient)
+                .flushErrorHandler(errors::add)
+                .maxBatchSize(100)
+                .build();
+
+        assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        assertThat(errors).hasSize(1);
+        assertThat(reporter.getKnownOperationCacheSize()).isZero();
+        assertThat(reporter.getPendingOperationQueueSize()).isEqualTo(1);
+        assertThat(httpClient.operationRequests()).hasSize(1);
+        assertThat(httpClient.usageRequests()).hasSize(1);
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        assertThat(reporter.getKnownOperationCacheSize()).isEqualTo(1);
+        assertThat(reporter.getPendingOperationQueueSize()).isZero();
+        assertThat(httpClient.operationRequests()).hasSize(2);
+        assertThat(httpClient.usageRequests()).hasSize(1);
+    }
+
+    @Test
+    void partialOperationRegistrationIsRetriedAndDoesNotCacheOperationHash() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueAccepted(0);
+        var errors = new CopyOnWriteArrayList<Throwable>();
+        var reporter = reporterBuilder(httpClient)
+                .flushErrorHandler(errors::add)
+                .maxBatchSize(100)
+                .build();
+
+        assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        assertThat(errors)
+                .hasSize(1)
+                .first()
+                .satisfies(error -> assertThat(error)
+                        .isInstanceOf(UsageReportClientException.class)
+                        .hasMessage("Operation registration accepted 0 of 1 operation definitions"));
+        assertThat(reporter.getKnownOperationCacheSize()).isZero();
+        assertThat(reporter.getPendingOperationQueueSize()).isEqualTo(1);
+        assertThat(httpClient.operationRequests()).hasSize(1);
+        assertThat(httpClient.usageRequests()).hasSize(1);
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        assertThat(reporter.getKnownOperationCacheSize()).isEqualTo(1);
+        assertThat(reporter.getPendingOperationQueueSize()).isZero();
+        assertThat(httpClient.operationRequests()).hasSize(2);
+        assertThat(httpClient.usageRequests()).hasSize(1);
     }
 
     @Test
@@ -770,14 +877,25 @@ class ApiUsageReporterTest {
             }
 
             return request.body()
-                    .map(InMemoryReactiveHttpClient::parseUsageRequest)
-                    .map(usageRequest -> protobufResponse(200, UsageReportResponse.newBuilder()
-                            .setAccepted(usageRequest.getRecordsCount())
+                    .map(body -> {
+                        if (request.uri().getPath().endsWith("/operations")) {
+                            return parseOperationRequest(body).getOperationsCount();
+                        }
+                        return parseUsageRequest(body).getEventsCount();
+                    })
+                    .map(accepted -> protobufResponse(200, UsageReportResponse.newBuilder()
+                            .setAccepted(accepted)
                             .build()));
         }
 
         private void enqueueStatus(int statusCode) {
             responses.add(Mono.just(new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(new byte[0]))));
+        }
+
+        private void enqueueAccepted(int accepted) {
+            responses.add(Mono.just(protobufResponse(200, UsageReportResponse.newBuilder()
+                    .setAccepted(accepted)
+                    .build())));
         }
 
         private void enqueueError(Throwable error) {
@@ -788,12 +906,24 @@ class ApiUsageReporterTest {
             return requests;
         }
 
-        private UsageReportRequest usageRequest(int index) {
-            return parseUsageRequest(requests.get(index));
+        private RegisterOperationsRequest operationRequest(int index) {
+            return operationRequests().get(index);
         }
 
-        private List<UsageReportRequest> usageRequests() {
+        private List<RegisterOperationsRequest> operationRequests() {
             return requests.stream()
+                    .filter(request -> request.uri().getPath().endsWith("/operations"))
+                    .map(InMemoryReactiveHttpClient::parseOperationRequest)
+                    .toList();
+        }
+
+        private IngestUsageRequest usageRequest(int index) {
+            return usageRequests().get(index);
+        }
+
+        private List<IngestUsageRequest> usageRequests() {
+            return requests.stream()
+                    .filter(request -> request.uri().getPath().endsWith("/usage"))
                     .map(InMemoryReactiveHttpClient::parseUsageRequest)
                     .toList();
         }
@@ -802,14 +932,37 @@ class ApiUsageReporterTest {
             return new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(response.toByteArray()));
         }
 
-        private static UsageReportRequest parseUsageRequest(ReactiveHttpRequest request) {
+        private static RegisterOperationsRequest parseOperationRequest(ReactiveHttpRequest request) {
+            byte[] body = request.body().block(Duration.ofSeconds(1));
+            return parseOperationRequest(body);
+        }
+
+        private static RegisterOperationsRequest parseOperationRequest(byte[] body) {
+            try {
+                return RegisterOperationsRequest.parseFrom(gunzip(body));
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+        }
+
+        private static IngestUsageRequest parseUsageRequest(ReactiveHttpRequest request) {
             byte[] body = request.body().block(Duration.ofSeconds(1));
             return parseUsageRequest(body);
         }
 
-        private static UsageReportRequest parseUsageRequest(byte[] body) {
+        private static IngestUsageRequest parseUsageRequest(byte[] body) {
             try {
-                return UsageReportRequest.parseFrom(body);
+                return IngestUsageRequest.parseFrom(gunzip(body));
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+        }
+
+        private static byte[] gunzip(byte[] body) {
+            try (var input = new GZIPInputStream(new ByteArrayInputStream(body));
+                 var output = new ByteArrayOutputStream()) {
+                input.transferTo(output);
+                return output.toByteArray();
             } catch (Exception e) {
                 throw new AssertionError(e);
             }

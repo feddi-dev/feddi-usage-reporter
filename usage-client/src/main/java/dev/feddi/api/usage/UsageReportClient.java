@@ -3,51 +3,73 @@ package dev.feddi.api.usage;
 import com.google.protobuf.InvalidProtocolBufferException;
 import dev.feddi.api.usage.http.ReactiveHttpClient;
 import dev.feddi.api.usage.http.ReactiveHttpRequest;
-import dev.feddi.api.usage.v1.UsageReportRequest;
+import dev.feddi.api.usage.v1.IngestUsageRequest;
+import dev.feddi.api.usage.v1.RegisterOperationsRequest;
 import dev.feddi.api.usage.v1.UsageReportResponse;
 import org.jspecify.annotations.Nullable;
 import reactor.core.publisher.Mono;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.zip.GZIPOutputStream;
 
 final class UsageReportClient {
 
     static final String PROTOBUF_CONTENT_TYPE = "application/x-protobuf";
-    static final String DEFAULT_USAGE_PROTO_PATH = "/api/usage-proto";
+    static final String OPERATIONS_PROTO_PATH = "/api/usage-proto/operations";
+    static final String USAGE_PROTO_PATH = "/api/usage-proto/usage";
     static final URI DEFAULT_PLATFORM_HOST = URI.create("https://feddi.dev");
 
     private final ReactiveHttpClient httpClient;
-    private final URI endpointUri;
+    private final URI operationsEndpointUri;
+    private final URI usageEndpointUri;
     private final String bearerToken;
 
     UsageReportClient(ReactiveHttpClient httpClient, URI host, String bearerToken) {
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
-        this.endpointUri = resolveEndpoint(Objects.requireNonNull(host, "host"));
+        this.operationsEndpointUri = resolveEndpoint(Objects.requireNonNull(host, "host"), OPERATIONS_PROTO_PATH);
+        this.usageEndpointUri = resolveEndpoint(Objects.requireNonNull(host, "host"), USAGE_PROTO_PATH);
         this.bearerToken = requireNonBlank(bearerToken, "bearerToken");
     }
 
-    Mono<UsageReportResponse> report(UsageReportRequest request) {
+    Mono<UsageReportResponse> registerOperations(RegisterOperationsRequest request) {
         Objects.requireNonNull(request, "request");
+        return send(operationsEndpointUri, request.toByteArray());
+    }
 
-        var httpRequest = new ReactiveHttpRequest(
-                "POST",
-                endpointUri,
-                Map.of(
-                        "Authorization", List.of("Bearer " + bearerToken),
-                        "Content-Type", List.of(PROTOBUF_CONTENT_TYPE),
-                        "Accept", List.of(PROTOBUF_CONTENT_TYPE)
-                ),
-                Mono.just(request.toByteArray())
-        );
+    Mono<UsageReportResponse> report(IngestUsageRequest request) {
+        Objects.requireNonNull(request, "request");
+        return send(usageEndpointUri, request.toByteArray());
+    }
+
+    private Mono<UsageReportResponse> send(URI endpointUri, byte[] protobufBody) {
+        byte[] compressedBody;
+        try {
+            compressedBody = gzip(protobufBody);
+        } catch (IOException e) {
+            return Mono.error(new UsageReportClientException("Failed to gzip usage report request", e));
+        }
+
+        var httpRequest = new ReactiveHttpRequest("POST", endpointUri, headers(), Mono.just(compressedBody));
 
         return httpClient.exchange(httpRequest)
                 .switchIfEmpty(Mono.error(new UsageReportClientException("HTTP client completed without a response")))
                 .flatMap(response -> response.body()
                         .defaultIfEmpty(new byte[0])
                         .flatMap(body -> parseResponse(response.statusCode(), body)));
+    }
+
+    private Map<String, List<String>> headers() {
+        return Map.of(
+                "Authorization", List.of("Bearer " + bearerToken),
+                "Content-Type", List.of(PROTOBUF_CONTENT_TYPE),
+                "Content-Encoding", List.of("gzip"),
+                "Accept", List.of(PROTOBUF_CONTENT_TYPE)
+        );
     }
 
     private static Mono<UsageReportResponse> parseResponse(int statusCode, byte[] body) {
@@ -65,7 +87,7 @@ final class UsageReportClient {
         }
     }
 
-    private static URI resolveEndpoint(URI baseUri) {
+    private static URI resolveEndpoint(URI baseUri, String path) {
         if (!baseUri.isAbsolute()) {
             throw new IllegalArgumentException("host must be an absolute URI");
         }
@@ -79,7 +101,15 @@ final class UsageReportClient {
         while (base.endsWith("/")) {
             base = base.substring(0, base.length() - 1);
         }
-        return URI.create(base + DEFAULT_USAGE_PROTO_PATH);
+        return URI.create(base + path);
+    }
+
+    static byte[] gzip(byte[] body) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(output)) {
+            gzip.write(body);
+        }
+        return output.toByteArray();
     }
 
     private static String requireNonBlank(@Nullable String value, String name) {
