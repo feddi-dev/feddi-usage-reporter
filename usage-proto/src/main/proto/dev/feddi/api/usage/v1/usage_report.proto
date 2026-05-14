@@ -8,22 +8,45 @@ option java_multiple_files = true;
 option java_outer_classname = "UsageReportProto";
 option java_package = "dev.feddi.api.usage.v1";
 
-message UsageReportRequest {
-  repeated UsageRecord records = 1;
+message RegisterOperationsRequest {
+  repeated OperationDefinition operations = 1;
 }
 
-message UsageRecord {
-  string operation_name = 1;
-  string operation_type = 2;
-  string canonical_document = 3;
-  repeated string field_coordinates = 4;
-  int64 duration_nanos = 5;
-  bool http_error = 6;
-  bool graphql_error = 7;
-  string client_name = 8;
-  string client_version = 9;
-  google.protobuf.Timestamp timestamp = 10;
-  optional int32 multiplier = 11;
+message OperationDefinition {
+  string operation_hash = 1;
+  string operation_name = 2;
+  string operation_type = 3;
+  string canonical_document = 4;
+  repeated string field_coordinates = 5;
+  repeated InputUsageCoordinate input_usage_coordinates = 6;
+}
+
+message IngestUsageRequest {
+  repeated UsageEvent events = 1;
+}
+
+message UsageEvent {
+  string operation_hash = 1;
+  int64 duration_nanos = 2;
+  bool http_error = 3;
+  bool graphql_error = 4;
+  string client_name = 5;
+  string client_version = 6;
+  google.protobuf.Timestamp timestamp = 7;
+  optional int32 multiplier = 8;
+}
+
+message InputUsageCoordinate {
+  string coordinate = 1;
+  InputUsageCoordinateKind kind = 2;
+}
+
+enum InputUsageCoordinateKind {
+  INPUT_USAGE_COORDINATE_KIND_UNSPECIFIED = 0;
+  FIELD_ARGUMENT = 1;
+  INPUT_OBJECT_FIELD = 2;
+  USED_DIRECTIVE = 3;
+  DIRECTIVE_ARGUMENT = 4;
 }
 
 message UsageReportResponse {

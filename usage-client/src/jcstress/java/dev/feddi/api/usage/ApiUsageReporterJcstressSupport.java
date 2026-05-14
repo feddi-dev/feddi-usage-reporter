@@ -3,7 +3,8 @@ package dev.feddi.api.usage;
 import dev.feddi.api.usage.http.ReactiveHttpClient;
 import dev.feddi.api.usage.http.ReactiveHttpRequest;
 import dev.feddi.api.usage.http.ReactiveHttpResponse;
-import dev.feddi.api.usage.v1.UsageReportRequest;
+import dev.feddi.api.usage.v1.IngestUsageRequest;
+import dev.feddi.api.usage.v1.RegisterOperationsRequest;
 import dev.feddi.api.usage.v1.UsageReportResponse;
 import graphql.parser.Parser;
 import graphql.schema.GraphQLSchema;
@@ -12,10 +13,13 @@ import graphql.schema.idl.SchemaGenerator;
 import graphql.schema.idl.SchemaParser;
 import reactor.core.publisher.Mono;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.GZIPInputStream;
 
 final class ApiUsageReporterJcstressSupport {
 
@@ -78,10 +82,14 @@ final class ApiUsageReporterJcstressSupport {
         @Override
         public Mono<ReactiveHttpResponse> exchange(ReactiveHttpRequest request) {
             return request.body()
-                    .map(CountingReactiveHttpClient::parseUsageRequest)
-                    .map(usageRequest -> {
-                        int accepted = usageRequest.getRecordsCount();
-                        acceptedCount.addAndGet(accepted);
+                    .map(body -> {
+                        int accepted;
+                        if (request.uri().getPath().endsWith("/usage")) {
+                            accepted = parseUsageRequest(body).getEventsCount();
+                            acceptedCount.addAndGet(accepted);
+                        } else {
+                            accepted = parseOperationRequest(body).getOperationsCount();
+                        }
                         return new ReactiveHttpResponse(
                                 200,
                                 Map.of(),
@@ -97,9 +105,29 @@ final class ApiUsageReporterJcstressSupport {
             return acceptedCount.get();
         }
 
-        private static UsageReportRequest parseUsageRequest(byte[] body) {
+        private static RegisterOperationsRequest parseOperationRequest(byte[] body) {
             try {
-                return UsageReportRequest.parseFrom(body);
+                return RegisterOperationsRequest.parseFrom(gunzip(body));
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+        }
+
+        private static IngestUsageRequest parseUsageRequest(byte[] body) {
+            try {
+                return IngestUsageRequest.parseFrom(gunzip(body));
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+        }
+
+        private static byte[] gunzip(byte[] body) {
+            try {
+                try (var input = new GZIPInputStream(new ByteArrayInputStream(body));
+                     var output = new ByteArrayOutputStream()) {
+                    input.transferTo(output);
+                    return output.toByteArray();
+                }
             } catch (Exception e) {
                 throw new AssertionError(e);
             }

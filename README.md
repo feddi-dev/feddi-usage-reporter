@@ -11,16 +11,20 @@ Java 21 modules for sending protobuf usage reports to the feddi Platform.
 The backend depends only on `usage-proto`. Applications should depend on
 `usage-client`, provide their own `ReactiveHttpClient` implementation, and
 configure `ApiUsageReporter` with a Feddi graph variant key via
-`feddiGraphVariantKey(...)`. The reporter sends to
-`https://feddi.dev/api/usage-proto` by default. Tests and self-hosted
-deployments can override the host, but the endpoint path is always
-`/api/usage-proto`.
+`feddiGraphVariantKey(...)`. The reporter sends gzipped protobuf requests to
+`https://feddi.dev` by default. Tests and self-hosted deployments can override
+the host, but the endpoint paths are fixed to `/api/usage-proto/operations`
+for operation definitions and `/api/usage-proto/usage` for usage events.
 
 `ApiUsageReporter` receives a GraphQL Java `Document`, operation name, and
-`GraphQLSchema` for each completed API call. It generates the canonical
-operation document with `AstSignature`, extracts field coordinates, samples
+`GraphQLSchema` for each completed API call. It generates an input-aware
+canonical operation document with `AstSignature`, extracts field coordinates,
+field argument coordinates, and input object field coordinates, samples
 high-throughput traffic, and periodically flushes protobuf batches to the
-feddi Platform.
+feddi Platform. Operation definitions are registered separately from usage
+events. Each reporter keeps an in-memory cache of operation hashes it already
+registered, so repeated requests send only the hash and request-specific usage
+metadata.
 
 ## Usage Guide
 
@@ -79,9 +83,9 @@ var reporter = ApiUsageReporter.builder(new WebClientReactiveHttpClient())
         .build();
 ```
 
-The default host is `https://feddi.dev`, and the endpoint path is always
-`/api/usage-proto`. Self-hosted deployments and tests can override only the
-host:
+The default host is `https://feddi.dev`. Self-hosted deployments and tests can
+override only the host; the operation-registration and usage-ingestion paths
+remain fixed:
 
 ```java
 var reporter = ApiUsageReporter.builder(httpClient)
@@ -94,6 +98,10 @@ Report each completed GraphQL request after execution. The `Document` should be
 the parsed GraphQL Java document for the request, and the `GraphQLSchema`
 should be the executable schema used to run it.
 
+Pass the runtime variables map when the operation used variables. This lets the
+reporter detect which optional input object fields were actually present in the
+request. Inline input object literals are analyzed from the GraphQL document.
+
 ```java
 import dev.feddi.api.usage.ApiUsageInvocation;
 
@@ -105,6 +113,7 @@ boolean queued = reporter.report(ApiUsageInvocation.builder()
         .document(document)
         .operationName(operationName)
         .schema(graphQLSchema)
+        .variables(variables)
         .durationNanos(System.nanoTime() - startedAt)
         .httpError(httpStatusCode >= 500)
         .graphqlError(!executionResult.getErrors().isEmpty())
@@ -127,6 +136,17 @@ Reactive hosts can use `closeAsync()` instead:
 ```java
 reporter.closeAsync().subscribe();
 ```
+
+### Protobuf Transport
+
+The reporter uses two protobuf endpoints:
+
+- `/api/usage-proto/operations` registers operation hashes, canonical
+  documents, field coordinates, and input usage coordinates.
+- `/api/usage-proto/usage` ingests request usage events by operation hash.
+
+Both request bodies are gzip-compressed and sent with
+`Content-Encoding: gzip`.
 
 ### Configuration
 

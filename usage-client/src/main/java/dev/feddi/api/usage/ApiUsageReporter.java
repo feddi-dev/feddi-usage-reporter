@@ -2,17 +2,26 @@ package dev.feddi.api.usage;
 
 import com.google.protobuf.Timestamp;
 import dev.feddi.api.usage.http.ReactiveHttpClient;
-import dev.feddi.api.usage.v1.UsageRecord;
-import dev.feddi.api.usage.v1.UsageReportRequest;
+import dev.feddi.api.usage.v1.IngestUsageRequest;
+import dev.feddi.api.usage.v1.InputUsageCoordinate;
+import dev.feddi.api.usage.v1.OperationDefinition;
+import dev.feddi.api.usage.v1.RegisterOperationsRequest;
+import dev.feddi.api.usage.v1.UsageEvent;
 import dev.feddi.api.usage.v1.UsageReportResponse;
 import org.jspecify.annotations.Nullable;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -29,13 +38,17 @@ import java.util.function.DoubleSupplier;
  * with the parsed GraphQL Java {@link graphql.language.Document}, operation name, executable
  * {@link graphql.schema.GraphQLSchema}, timing, and error metadata.
  *
- * <p>The reporter derives the canonical operation document and field coordinates locally, batches
- * records in memory, and sends protobuf batches to the platform. The platform calculates the
- * operation hash from the canonical document on ingest.
+ * <p>The reporter derives the canonical operation document, field coordinates, field argument
+ * coordinates, used directives, directive argument coordinates, and input object field coordinates
+ * locally, batches records in memory, and sends protobuf batches to the platform. The platform
+ * stores operation definitions separately from usage events. The reporter calculates the operation
+ * hash from the canonical document, registers unknown operations in gzipped protobuf batches, and
+ * sends usage batches containing only operation hashes and request-specific metadata.
  *
  * <p>HTTP transport is deliberately pluggable. Applications provide a {@link ReactiveHttpClient}
  * implementation, usually backed by the HTTP client they already use. The default host is
- * {@code https://feddi.dev}; the endpoint path is fixed to {@code /api/usage-proto}.
+ * {@code https://feddi.dev}; endpoint paths are fixed to
+ * {@code /api/usage-proto/operations} and {@code /api/usage-proto/usage}.
  *
  * <p>Instances support concurrent {@code report(...)} calls. Call {@link #closeAsync()} or
  * {@link #close()} during shutdown to flush queued usage before the process exits.
@@ -60,6 +73,8 @@ public final class ApiUsageReporter implements AutoCloseable {
     private final UsageReportClient client;
     private final ApiUsageDocumentAnalyzer analyzer;
     private final ConcurrentLinkedQueue<PendingUsage> pendingQueue = new ConcurrentLinkedQueue<>();
+    private final ConcurrentHashMap<String, OperationDefinition> pendingOperations = new ConcurrentHashMap<>();
+    private final Set<String> knownOperationHashes = ConcurrentHashMap.newKeySet();
     private final AtomicInteger pendingCount = new AtomicInteger(0);
     private final Object lifecycleLock = new Object();
     private final int maxBatchSize;
@@ -203,12 +218,22 @@ public final class ApiUsageReporter implements AutoCloseable {
     private Mono<UsageReportResponse> processAndFlush() {
         recalculateSampling();
 
-        var request = drainBatch();
-        if (request.getRecordsCount() == 0) {
+        var batch = drainBatch();
+        if (batch.usageRequest().getEventsCount() == 0 && batch.operationDefinitions().isEmpty()) {
             return Mono.just(UsageReportResponse.newBuilder().setAccepted(0).build());
         }
 
-        return client.report(request);
+        Mono<UsageReportResponse> registration = registerOperations(batch.operationDefinitions());
+        if (batch.usageRequest().getEventsCount() == 0) {
+            return registration;
+        }
+
+        return registration
+                .onErrorResume(error -> {
+                    flushErrorHandler.accept(error);
+                    return Mono.just(UsageReportResponse.newBuilder().setAccepted(0).build());
+                })
+                .then(client.report(batch.usageRequest()));
     }
 
     private void recalculateSampling() {
@@ -229,33 +254,37 @@ public final class ApiUsageReporter implements AutoCloseable {
         }
     }
 
-    private UsageReportRequest drainBatch() {
-        var records = new ArrayList<UsageRecord>(maxBatchSize);
+    private DrainedBatch drainBatch() {
+        var events = new ArrayList<UsageEvent>(maxBatchSize);
         PendingUsage pending;
-        while (records.size() < maxBatchSize && (pending = pendingQueue.poll()) != null) {
+        while (events.size() < maxBatchSize && (pending = pendingQueue.poll()) != null) {
             pendingCount.decrementAndGet();
             try {
-                records.add(toProto(pending));
+                events.add(toUsageEvent(pending));
             } catch (RuntimeException e) {
                 droppedCount.incrementAndGet();
                 flushErrorHandler.accept(e);
             }
         }
 
-        return UsageReportRequest.newBuilder()
-                .addAllRecords(records)
-                .build();
+        return new DrainedBatch(
+                drainOperationDefinitions(),
+                IngestUsageRequest.newBuilder()
+                        .addAllEvents(events)
+                        .build()
+        );
     }
 
-    private UsageRecord toProto(PendingUsage pending) {
+    private UsageEvent toUsageEvent(PendingUsage pending) {
         var invocation = pending.invocation();
         var usage = analyzer.analyze(invocation);
+        String operationHash = sha256Hex(usage.canonicalDocument());
+        if (!knownOperationHashes.contains(operationHash)) {
+            pendingOperations.putIfAbsent(operationHash, toOperationDefinition(operationHash, usage));
+        }
 
-        var builder = UsageRecord.newBuilder()
-                .setOperationName(nullToEmpty(usage.operationName()))
-                .setOperationType(usage.operationType())
-                .setCanonicalDocument(usage.canonicalDocument())
-                .addAllFieldCoordinates(usage.fieldCoordinates())
+        var builder = UsageEvent.newBuilder()
+                .setOperationHash(operationHash)
                 .setDurationNanos(invocation.durationNanos())
                 .setHttpError(invocation.httpError())
                 .setGraphqlError(invocation.graphqlError())
@@ -270,6 +299,65 @@ public final class ApiUsageReporter implements AutoCloseable {
         return builder.build();
     }
 
+    private OperationDefinition toOperationDefinition(String operationHash, ApiUsageDocumentAnalyzer.ProcessedUsage usage) {
+        return OperationDefinition.newBuilder()
+                .setOperationHash(operationHash)
+                .setOperationName(nullToEmpty(usage.operationName()))
+                .setOperationType(usage.operationType())
+                .setCanonicalDocument(usage.canonicalDocument())
+                .addAllFieldCoordinates(usage.fieldCoordinates())
+                .addAllInputUsageCoordinates(usage.inputUsageCoordinates().stream()
+                        .map(inputUsage -> InputUsageCoordinate.newBuilder()
+                                .setCoordinate(inputUsage.coordinate())
+                                .setKind(inputUsage.kind())
+                                .build())
+                        .toList())
+                .build();
+    }
+
+    private List<OperationDefinition> drainOperationDefinitions() {
+        var operations = new ArrayList<OperationDefinition>(maxBatchSize);
+        for (var entry : pendingOperations.entrySet()) {
+            if (operations.size() >= maxBatchSize) {
+                break;
+            }
+            String operationHash = entry.getKey();
+            OperationDefinition operation = entry.getValue();
+            if (knownOperationHashes.contains(operationHash)) {
+                pendingOperations.remove(operationHash, operation);
+                continue;
+            }
+            if (pendingOperations.remove(operationHash, operation)) {
+                operations.add(operation);
+            }
+        }
+        return operations;
+    }
+
+    private Mono<UsageReportResponse> registerOperations(List<OperationDefinition> operations) {
+        if (operations.isEmpty()) {
+            return Mono.just(UsageReportResponse.newBuilder().setAccepted(0).build());
+        }
+
+        var request = RegisterOperationsRequest.newBuilder()
+                .addAllOperations(operations)
+                .build();
+        return client.registerOperations(request)
+                .flatMap(response -> {
+                    if (response.getAccepted() != operations.size()) {
+                        return Mono.error(new UsageReportClientException(
+                                "Operation registration accepted " + response.getAccepted()
+                                        + " of " + operations.size() + " operation definitions"
+                        ));
+                    }
+                    operations.forEach(operation -> knownOperationHashes.add(operation.getOperationHash()));
+                    return Mono.just(response);
+                })
+                .doOnError(error -> operations.forEach(operation ->
+                        pendingOperations.putIfAbsent(operation.getOperationHash(), operation)
+                ));
+    }
+
     private static Timestamp toTimestamp(Instant instant) {
         return Timestamp.newBuilder()
                 .setSeconds(instant.getEpochSecond())
@@ -279,6 +367,15 @@ public final class ApiUsageReporter implements AutoCloseable {
 
     private static String nullToEmpty(@Nullable String value) {
         return value == null ? "" : value;
+    }
+
+    private static String sha256Hex(String input) {
+        try {
+            var digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new IllegalStateException("SHA-256 is not available", e);
+        }
     }
 
     private static String requireNonBlank(@Nullable String value, String name) {
@@ -304,7 +401,18 @@ public final class ApiUsageReporter implements AutoCloseable {
         return droppedCount.get();
     }
 
+    int getKnownOperationCacheSize() {
+        return knownOperationHashes.size();
+    }
+
+    int getPendingOperationQueueSize() {
+        return pendingOperations.size();
+    }
+
     private record PendingUsage(ApiUsageInvocation invocation, int multiplier) {
+    }
+
+    private record DrainedBatch(List<OperationDefinition> operationDefinitions, IngestUsageRequest usageRequest) {
     }
 
     /**
@@ -346,7 +454,8 @@ public final class ApiUsageReporter implements AutoCloseable {
          * Overrides the platform host.
          *
          * <p>The URI must be absolute and must not include a path other than an optional trailing
-         * slash, query, or fragment. The endpoint path remains fixed to {@code /api/usage-proto}.
+         * slash, query, or fragment. The endpoint paths remain fixed to
+         * {@code /api/usage-proto/operations} and {@code /api/usage-proto/usage}.
          *
          * @param host platform host, for example {@code https://feddi.dev}
          * @return this builder

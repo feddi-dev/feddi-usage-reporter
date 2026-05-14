@@ -1,5 +1,6 @@
 package dev.feddi.api.usage;
 
+import dev.feddi.api.usage.v1.InputUsageCoordinateKind;
 import graphql.parser.Parser;
 import graphql.schema.GraphQLSchema;
 import graphql.schema.idl.RuntimeWiring;
@@ -7,6 +8,9 @@ import graphql.schema.idl.SchemaGenerator;
 import graphql.schema.idl.SchemaParser;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -48,15 +52,15 @@ class ApiUsageDocumentAnalyzerTest {
         assertThat(usage.operationType()).isEqualTo("QUERY");
         assertThat(usage.canonicalDocument()).isNotBlank();
         assertThat(usage.fieldCoordinates()).containsExactly(
+                "Image.url",
+                "Profile.avatar",
+                "Profile.bio",
                 "Query.viewer",
+                "User.friend",
                 "User.id",
                 "User.name",
-                "User.status",
                 "User.profile",
-                "Profile.bio",
-                "Profile.avatar",
-                "Image.url",
-                "User.friend"
+                "User.status"
         );
     }
 
@@ -82,12 +86,12 @@ class ApiUsageDocumentAnalyzerTest {
                 """);
 
         assertThat(usage.fieldCoordinates()).containsExactly(
-                "Query.viewer",
-                "User.id",
-                "User.profile",
                 "Profile.bio",
+                "Query.viewer",
                 "User.friend",
-                "User.name"
+                "User.id",
+                "User.name",
+                "User.profile"
         );
     }
 
@@ -132,17 +136,17 @@ class ApiUsageDocumentAnalyzerTest {
                 """);
 
         assertThat(usage.fieldCoordinates()).containsExactly(
-                "Query.node",
                 "Node.id",
-                "User.name",
-                "User.status",
-                "Product.sku",
-                "Product.price",
+                "Product.displayName",
                 "Product.owner",
-                "User.id",
+                "Product.price",
+                "Product.sku",
+                "Query.node",
                 "Query.search",
                 "User.friend",
-                "Product.displayName"
+                "User.id",
+                "User.name",
+                "User.status"
         );
     }
 
@@ -172,8 +176,8 @@ class ApiUsageDocumentAnalyzerTest {
 
         assertThat(usage.fieldCoordinates()).containsExactly(
                 "Query.viewer",
-                "User.id",
                 "User.friend",
+                "User.id",
                 "User.name"
         );
     }
@@ -215,11 +219,11 @@ class ApiUsageDocumentAnalyzerTest {
                 """);
 
         assertThat(usage.fieldCoordinates()).containsExactly(
+                "Profile.bio",
                 "Query.viewer",
                 "User.id",
                 "User.name",
-                "User.profile",
-                "Profile.bio"
+                "User.profile"
         );
         assertThat(usage.fieldCoordinates()).doesNotHaveDuplicates();
     }
@@ -266,12 +270,12 @@ class ApiUsageDocumentAnalyzerTest {
                 """);
 
         assertThat(usage.fieldCoordinates()).containsExactly(
-                "Query.node",
                 "Node.id",
-                "User.id",
-                "User.name",
+                "Product.displayName",
+                "Query.node",
                 "Query.search",
-                "Product.displayName"
+                "User.id",
+                "User.name"
         );
         assertThat(usage.fieldCoordinates()).doesNotHaveDuplicates();
     }
@@ -299,10 +303,175 @@ class ApiUsageDocumentAnalyzerTest {
         assertThat(usage.operationType()).isEqualTo("MUTATION");
         assertThat(usage.fieldCoordinates()).containsExactly(
                 "Mutation.updateUserStatus",
-                "User.status",
+                "Profile.bio",
                 "User.profile",
-                "Profile.bio"
+                "User.status"
         );
+    }
+
+    @Test
+    void analyze_extractsFieldArgumentsAndInlineInputObjectFields() {
+        var usage = analyze("InputUsage", """
+                query InputUsage {
+                  viewer(
+                    filter: {
+                      status: ACTIVE
+                      profile: {
+                        bioContains: "hello"
+                        avatar: { size: 64 }
+                      }
+                    }
+                    tags: [
+                      { value: "internal", metadata: { source: "test" } }
+                    ]
+                  ) {
+                    id
+                  }
+                }
+                """);
+
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.FIELD_ARGUMENT)).containsExactly(
+                "Query.viewer(filter:)",
+                "Query.viewer(tags:)"
+        );
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
+                "AvatarFilter.size",
+                "ProfileFilter.avatar",
+                "ProfileFilter.bioContains",
+                "TagInput.metadata",
+                "TagInput.value",
+                "TagMetadataInput.source",
+                "UserFilter.profile",
+                "UserFilter.status"
+        );
+    }
+
+    @Test
+    void analyze_extractsInputObjectFieldsFromRuntimeVariables() {
+        var variables = new LinkedHashMap<String, Object>();
+        variables.put("term", "product");
+        var productFilter = new LinkedHashMap<String, Object>();
+        productFilter.put("sku", "SKU-1");
+        productFilter.put("minPrice", 100);
+        var searchFilter = new LinkedHashMap<String, Object>();
+        searchFilter.put("product", productFilter);
+        variables.put("filter", searchFilter);
+
+        var usage = analyze("SearchWithVariables", """
+                query SearchWithVariables($term: String!, $filter: SearchFilter) {
+                  search(text: $term, filter: $filter) {
+                    ... on Product {
+                      sku
+                    }
+                  }
+                }
+                """, variables);
+
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.FIELD_ARGUMENT)).containsExactly(
+                "Query.search(filter:)",
+                "Query.search(text:)"
+        );
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
+                "ProductFilter.minPrice",
+                "ProductFilter.sku",
+                "SearchFilter.product"
+        );
+    }
+
+    @Test
+    void analyze_extractsUsedDirectivesAndDirectiveArguments() {
+        var variables = new LinkedHashMap<String, Object>();
+        variables.put("includeViewer", true);
+        variables.put("meta", Map.of(
+                "profile", Map.of("bioContains", "hello")
+        ));
+
+        var usage = analyze("DirectiveUsage", """
+                query DirectiveUsage(
+                  $includeViewer: Boolean!
+                  $meta: UserFilter @usageMeta(meta: { status: ACTIVE })
+                ) @usageMeta(meta: { status: ACTIVE }, enabled: true) {
+                  viewer @include(if: $includeViewer) @usageMeta(meta: $meta) {
+                    id
+                  }
+                }
+                """, variables);
+
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.USED_DIRECTIVE)).containsExactly(
+                "@include",
+                "@usageMeta"
+        );
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.DIRECTIVE_ARGUMENT)).containsExactly(
+                "@include(if:)",
+                "@usageMeta(enabled:)",
+                "@usageMeta(meta:)"
+        );
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
+                "ProfileFilter.bioContains",
+                "UserFilter.profile",
+                "UserFilter.status"
+        );
+    }
+
+    @Test
+    void analyze_operationSignatureIncludesSuppliedInputShape() {
+        var usageWithStatusOnly = analyze("InputShape", """
+                query InputShape {
+                  viewer(filter: { status: ACTIVE }) {
+                    id
+                  }
+                }
+                """);
+        var usageWithNestedProfile = analyze("InputShape", """
+                query InputShape {
+                  viewer(filter: { status: ACTIVE, profile: { bioContains: "hello" } }) {
+                    id
+                  }
+                }
+                """);
+
+        assertThat(usageWithStatusOnly.canonicalDocument())
+                .isNotEqualTo(usageWithNestedProfile.canonicalDocument());
+        assertThat(coordinatesOfKind(usageWithStatusOnly, InputUsageCoordinateKind.INPUT_OBJECT_FIELD))
+                .containsExactly("UserFilter.status");
+        assertThat(coordinatesOfKind(usageWithNestedProfile, InputUsageCoordinateKind.INPUT_OBJECT_FIELD))
+                .containsExactly("ProfileFilter.bioContains", "UserFilter.profile", "UserFilter.status");
+    }
+
+    @Test
+    void analyze_omitsAbsentVariableInputFieldsFromSignatureAndCoordinates() {
+        var usage = analyze("OptionalInput", """
+                query OptionalInput($filter: UserFilter) {
+                  viewer(filter: $filter) {
+                    id
+                  }
+                }
+                """);
+
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.FIELD_ARGUMENT)).isEmpty();
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).isEmpty();
+    }
+
+    @Test
+    void analyze_reportsRepeatedInputUsageCoordinatesExactlyOnce() {
+        var usage = analyze("RepeatedInputUsage", """
+                query RepeatedInputUsage {
+                  first: viewer(filter: { status: ACTIVE }) {
+                    id
+                  }
+                  second: viewer(filter: { status: ACTIVE }) {
+                    id
+                  }
+                }
+                """);
+
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.FIELD_ARGUMENT)).containsExactly(
+                "Query.viewer(filter:)"
+        );
+        assertThat(coordinatesOfKind(usage, InputUsageCoordinateKind.INPUT_OBJECT_FIELD)).containsExactly(
+                "UserFilter.status"
+        );
+        assertThat(usage.inputUsageCoordinates()).doesNotHaveDuplicates();
     }
 
     @Test
@@ -327,15 +496,36 @@ class ApiUsageDocumentAnalyzerTest {
     }
 
     private ApiUsageDocumentAnalyzer.ProcessedUsage analyze(@Nullable String operationName, String documentBody) {
+        return analyze(operationName, documentBody, Map.of());
+    }
+
+    private ApiUsageDocumentAnalyzer.ProcessedUsage analyze(
+            @Nullable String operationName,
+            String documentBody,
+            Map<String, Object> variables
+    ) {
         return analyzer.analyze(ApiUsageInvocation.builder()
                 .document(Parser.parse(documentBody))
                 .operationName(operationName)
                 .schema(SCHEMA)
+                .variables(variables)
                 .build());
+    }
+
+    private static java.util.List<String> coordinatesOfKind(
+            ApiUsageDocumentAnalyzer.ProcessedUsage usage,
+            InputUsageCoordinateKind kind
+    ) {
+        return usage.inputUsageCoordinates().stream()
+                .filter(coordinate -> coordinate.kind() == kind)
+                .map(ApiUsageDocumentAnalyzer.InputUsageCoordinate::coordinate)
+                .toList();
     }
 
     private static GraphQLSchema schema() {
         var registry = new SchemaParser().parse("""
+                directive @usageMeta(meta: UserFilter, enabled: Boolean) on QUERY | FIELD | VARIABLE_DEFINITION | FRAGMENT_SPREAD | INLINE_FRAGMENT
+
                 interface Node {
                   id: ID!
                 }
@@ -351,15 +541,52 @@ class ApiUsageDocumentAnalyzerTest {
 
                 union SearchResult = User | Product
 
-                type Query {
-                  viewer: User!
-                  node(id: ID!): Node
-                  search(text: String): [SearchResult!]!
-                }
+	                type Query {
+	                  viewer(filter: UserFilter, tags: [TagInput!]): User!
+	                  node(id: ID!): Node
+	                  search(text: String, filter: SearchFilter): [SearchResult!]!
+	                }
 
-                type Mutation {
-                  updateUserStatus(id: ID!, status: UserStatus!): User
-                }
+	                type Mutation {
+	                  updateUserStatus(id: ID!, status: UserStatus!, input: UpdateUserInput): User
+	                }
+
+	                input UserFilter {
+	                  status: UserStatus
+	                  profile: ProfileFilter
+	                }
+
+	                input ProfileFilter {
+	                  bioContains: String
+	                  avatar: AvatarFilter
+	                }
+
+	                input AvatarFilter {
+	                  size: Int
+	                }
+
+	                input TagInput {
+	                  value: String!
+	                  metadata: TagMetadataInput
+	                }
+
+	                input TagMetadataInput {
+	                  source: String
+	                }
+
+	                input SearchFilter {
+	                  product: ProductFilter
+	                }
+
+	                input ProductFilter {
+	                  sku: String
+	                  minPrice: Int
+	                }
+
+	                input UpdateUserInput {
+	                  status: UserStatus!
+	                  profile: ProfileFilter
+	                }
 
                 type Subscription {
                   userEvents: User
