@@ -9,19 +9,48 @@ allprojects {
 }
 
 group = 'dev.feddi.build'
-version = '0.1.0-SNAPSHOT'
+version = providers.gradleProperty('feddiApiUsageVersion').orElse('0.1.0-SNAPSHOT').get()
+
+def releaseVersion = version.toString()
+def localMavenRepositoryDir = layout.buildDirectory.dir('maven-repository')
+def centralPortalDir = layout.buildDirectory.dir('central-portal')
+
+def publicationName(Project project) {
+    switch (project.name) {
+        case 'feddi-api-usage-client':
+            return 'feddi API Usage Client'
+        case 'feddi-api-usage-proto':
+            return 'feddi API Usage Proto'
+        default:
+            return project.name
+    }
+}
+
+def publicationDescription(Project project) {
+    switch (project.name) {
+        case 'feddi-api-usage-client':
+            return 'Java client for reporting GraphQL API usage to the feddi Platform.'
+        case 'feddi-api-usage-proto':
+            return 'Protobuf schema and generated Java classes for feddi API usage reports.'
+        default:
+            return project.description ?: project.name
+    }
+}
 
 subprojects {
     apply plugin: 'java-library'
+    apply plugin: 'maven-publish'
+    apply plugin: 'signing'
 
     group = 'dev.feddi'
-    version = '0.1.0-SNAPSHOT'
+    version = releaseVersion
 
     java {
         toolchain {
             languageVersion = JavaLanguageVersion.of(21)
         }
         withSourcesJar()
+        withJavadocJar()
     }
 
     dependencies {
@@ -34,7 +63,94 @@ subprojects {
         options.release = 21
     }
 
+    tasks.withType(Javadoc).configureEach {
+        options.addStringOption('Xdoclint:none', '-quiet')
+    }
+
     test {
         useJUnitPlatform()
+    }
+
+    publishing {
+        publications {
+            mavenJava(MavenPublication) {
+                from components.java
+                artifactId = project.name
+
+                pom {
+                    name = publicationName(project)
+                    description = publicationDescription(project)
+                    url = 'https://github.com/feddi-dev/feddi-api-usage-client'
+
+                    licenses {
+                        license {
+                            name = 'Apache License, Version 2.0'
+                            url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                            distribution = 'repo'
+                        }
+                    }
+
+                    developers {
+                        developer {
+                            id = 'feddi'
+                            name = 'feddi'
+                            organization = 'feddi'
+                            organizationUrl = 'https://feddi.dev'
+                        }
+                    }
+
+                    scm {
+                        connection = 'scm:git:https://github.com/feddi-dev/feddi-api-usage-client.git'
+                        developerConnection = 'scm:git:https://github.com/feddi-dev/feddi-api-usage-client.git'
+                        url = 'https://github.com/feddi-dev/feddi-api-usage-client'
+                    }
+                }
+            }
+        }
+
+        repositories {
+            maven {
+                name = 'feddiApiUsage'
+                url = localMavenRepositoryDir
+            }
+        }
+    }
+
+    def signingKey = providers.gradleProperty('signingInMemoryKey')
+    def signingPassword = providers.gradleProperty('signingInMemoryKeyPassword')
+    def signingKeyValue = signingKey.getOrElse('')
+
+    signing {
+        required {
+            providers.gradleProperty('feddiApiUsageRequireSigning')
+                .map { it.toBoolean() }
+                .orElse(false)
+                .get()
+        }
+        if (!signingKeyValue.isBlank()) {
+            useInMemoryPgpKeys(signingKeyValue, signingPassword.getOrNull())
+            sign publishing.publications.mavenJava
+        }
+    }
+}
+
+tasks.register('publishToLocalMavenRepository') {
+    description = 'Publishes all API usage artifacts to the build-local Maven repository.'
+    group = 'publishing'
+    dependsOn subprojects.collect { it.tasks.named('publishAllPublicationsToFeddiApiUsageRepository') }
+}
+
+tasks.register('centralPortalBundle', Zip) {
+    description = 'Builds the deployment bundle accepted by the Sonatype Central Portal Publisher API.'
+    group = 'publishing'
+    dependsOn tasks.named('publishToLocalMavenRepository')
+    archiveFileName = "feddi-api-usage-client-${releaseVersion}-central-bundle.zip"
+    destinationDirectory = centralPortalDir
+    from localMavenRepositoryDir
+    doFirst {
+        if (providers.gradleProperty('feddiApiUsageRequireSigning').map { it.toBoolean() }.orElse(false).get() &&
+            providers.gradleProperty('signingInMemoryKey').getOrElse('').isBlank()) {
+            throw new GradleException('feddiApiUsageRequireSigning=true requires signingInMemoryKey')
+        }
     }
 }

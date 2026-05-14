@@ -32,7 +32,7 @@ Add the usage client to the API process that executes GraphQL requests:
 
 ```groovy
 dependencies {
-    implementation 'dev.feddi:feddi-api-usage-client:0.1.0-SNAPSHOT'
+    implementation 'dev.feddi:feddi-api-usage-client:<release-version>'
 }
 ```
 
