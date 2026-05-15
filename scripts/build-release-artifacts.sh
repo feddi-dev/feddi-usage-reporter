@@ -11,6 +11,8 @@ if [ "$REQUIRE_SIGNING" = "true" ]; then
   : "${ORG_GRADLE_PROJECT_signingInMemoryKeyPassword:?ORG_GRADLE_PROJECT_signingInMemoryKeyPassword is required when signing is required}"
 fi
 
+rm -rf build/maven-repository build/central-portal dist/api-usage
+
 ./gradlew clean build centralPortalBundle \
   -PfeddiApiUsageVersion="$VERSION" \
   -PfeddiApiUsageRequireSigning="$REQUIRE_SIGNING" \
