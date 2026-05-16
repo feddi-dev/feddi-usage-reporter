@@ -4,12 +4,14 @@ import com.google.protobuf.Timestamp;
 import dev.feddi.api.usage.v1.IngestUsageRequest;
 import dev.feddi.api.usage.v1.InputUsageCoordinate;
 import dev.feddi.api.usage.v1.InputUsageCoordinateKind;
+import dev.feddi.api.usage.v1.KnownOperationHashesResponse;
 import dev.feddi.api.usage.v1.OperationDefinition;
 import dev.feddi.api.usage.v1.RegisterOperationsRequest;
 import dev.feddi.api.usage.v1.UsageEvent;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -93,5 +95,17 @@ class UsageReportProtoTest {
         assertEquals(observedAt.getNano(), event.getTimestamp().getNanos());
         assertTrue(event.hasMultiplier());
         assertEquals(10, event.getMultiplier());
+    }
+
+    @Test
+    void knownOperationHashesResponse_roundTripsOperationHashes() throws Exception {
+        var response = KnownOperationHashesResponse.newBuilder()
+                .addOperationHashes("hash-a")
+                .addOperationHashes("hash-b")
+                .build();
+
+        var parsed = KnownOperationHashesResponse.parseFrom(response.toByteArray());
+
+        assertEquals(List.of("hash-a", "hash-b"), parsed.getOperationHashesList());
     }
 }

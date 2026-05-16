@@ -6,7 +6,7 @@ interface ReporterScheduler extends AutoCloseable {
 
     void execute(Runnable task);
 
-    Cancellable scheduleAtFixedRate(Runnable task, Duration initialDelay, Duration period);
+    Cancellable schedule(Runnable task, Duration delay);
 
     @Override
     void close();

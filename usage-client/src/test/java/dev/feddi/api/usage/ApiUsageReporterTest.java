@@ -4,6 +4,7 @@ import dev.feddi.api.usage.http.ReactiveHttpClient;
 import dev.feddi.api.usage.http.ReactiveHttpRequest;
 import dev.feddi.api.usage.http.ReactiveHttpResponse;
 import dev.feddi.api.usage.v1.IngestUsageRequest;
+import dev.feddi.api.usage.v1.KnownOperationHashesResponse;
 import dev.feddi.api.usage.v1.RegisterOperationsRequest;
 import dev.feddi.api.usage.v1.UsageReportResponse;
 import graphql.language.Document;
@@ -19,11 +20,14 @@ import reactor.test.StepVerifier;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -49,10 +53,18 @@ class ApiUsageReporterTest {
     }
 
     @Test
+    void defaultsUseNoSamplingTwentyToFortySecondBatchWindowAndOneMbQueueSize() {
+        assertThat(ApiUsageReporter.DEFAULT_BATCH_WINDOW_MIN).isEqualTo(Duration.ofSeconds(20));
+        assertThat(ApiUsageReporter.DEFAULT_BATCH_WINDOW_MAX).isEqualTo(Duration.ofSeconds(40));
+        assertThat(ApiUsageReporter.APPROX_COMPRESSED_USAGE_EVENT_BYTES).isEqualTo(45);
+        assertThat(ApiUsageReporter.DEFAULT_MAX_QUEUE_SIZE).isEqualTo(22_222);
+        assertThat(ApiUsageReporter.ABSOLUTE_MAX_QUEUE_SIZE).isEqualTo(44_444);
+    }
+
+    @Test
     void flushNow_isColdAndSendsQueuedUsageOnlyWhenSubscribed() {
         var httpClient = new InMemoryReactiveHttpClient();
         var reporter = reporterBuilder(httpClient)
-                .maxBatchSize(100)
                 .build();
 
         assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
@@ -68,11 +80,11 @@ class ApiUsageReporterTest {
                 .verifyComplete();
 
         assertThat(reporter.getPendingQueueSize()).isZero();
-        assertThat(httpClient.requests()).hasSize(2);
+        assertThat(httpClient.requests()).hasSize(3);
     }
 
     @Test
-    void flushNow_returnsAcceptedZeroAndDoesNotCallHttpWhenQueueIsEmpty() {
+    void flushNow_prefetchesKnownOperationHashesAndReturnsAcceptedZeroWhenQueueIsEmpty() {
         var httpClient = new InMemoryReactiveHttpClient();
         var reporter = reporterBuilder(httpClient).build();
 
@@ -80,7 +92,9 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isZero())
                 .verifyComplete();
 
-        assertThat(httpClient.requests()).isEmpty();
+        assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+        assertThat(httpClient.operationRequests()).isEmpty();
+        assertThat(httpClient.usageRequests()).isEmpty();
     }
 
     @Test
@@ -90,8 +104,7 @@ class ApiUsageReporterTest {
                 .feddiGraphVariantKey("fddi_test_key")
                 .scheduler(new ManualReporterScheduler())
                 .autoStart(false)
-                .flushInterval(Duration.ofSeconds(1))
-                .maxBatchSize(100)
+                .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
                 .randomSupplier(() -> 0.0)
                 .build();
 
@@ -116,7 +129,7 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
                 .verifyComplete();
 
-        var operationHttpRequest = httpClient.requests().getFirst();
+        var operationHttpRequest = httpClient.requestEndingWith("/operations");
         assertThat(operationHttpRequest.method()).isEqualTo("POST");
         assertThat(operationHttpRequest.uri()).isEqualTo(URI.create("https://feddi.dev/api/usage-proto/operations"));
         assertThat(operationHttpRequest.headers()).containsEntry("Authorization", List.of("Bearer fddi_test_key"));
@@ -124,7 +137,7 @@ class ApiUsageReporterTest {
         assertThat(operationHttpRequest.headers()).containsEntry("Content-Encoding", List.of("gzip"));
         assertThat(operationHttpRequest.headers()).containsEntry("Accept", List.of("application/x-protobuf"));
 
-        var usageHttpRequest = httpClient.requests().get(1);
+        var usageHttpRequest = httpClient.requestEndingWith("/usage");
         assertThat(usageHttpRequest.uri()).isEqualTo(URI.create("https://feddi.dev/api/usage-proto/usage"));
         assertThat(usageHttpRequest.headers()).containsEntry("Content-Encoding", List.of("gzip"));
 
@@ -152,7 +165,6 @@ class ApiUsageReporterTest {
     void flushNow_sendsInputUsageCoordinates() {
         var httpClient = new InMemoryReactiveHttpClient();
         var reporter = reporterBuilder(httpClient)
-                .maxBatchSize(100)
                 .build();
 
         assertThat(reporter.report(invocation(
@@ -189,7 +201,6 @@ class ApiUsageReporterTest {
     void report_dropsWhenQueueIsFull() {
         var httpClient = new InMemoryReactiveHttpClient();
         var reporter = reporterBuilder(httpClient)
-                .maxBatchSize(100)
                 .maxQueueSize(1)
                 .build();
 
@@ -202,12 +213,37 @@ class ApiUsageReporterTest {
     }
 
     @Test
-    void report_triggersBackgroundFlushWhenBatchSizeIsReached() {
+    void build_rejectsMaxQueueSizeAboveTwoMbCap() {
+        var httpClient = new InMemoryReactiveHttpClient();
+
+        assertThatThrownBy(() -> reporterBuilder(httpClient)
+                .maxQueueSize(ApiUsageReporter.ABSOLUTE_MAX_QUEUE_SIZE + 1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("max queue size must not exceed " + ApiUsageReporter.ABSOLUTE_MAX_QUEUE_SIZE);
+    }
+
+    @Test
+    void build_acceptsAbsoluteMaxQueueSize() {
+        var httpClient = new InMemoryReactiveHttpClient();
+
+        var reporter = reporterBuilder(httpClient)
+                .maxQueueSize(ApiUsageReporter.ABSOLUTE_MAX_QUEUE_SIZE)
+                .build();
+
+        try {
+            assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+            assertThat(reporter.getPendingQueueSize()).isEqualTo(1);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
+    void report_triggersBackgroundFlushWhenQueueIsFull() {
         var httpClient = new InMemoryReactiveHttpClient();
         var scheduler = new ManualReporterScheduler();
         var reporter = reporterBuilder(httpClient, scheduler)
-                .maxBatchSize(2)
-                .maxQueueSize(10)
+                .maxQueueSize(2)
                 .build();
 
         try {
@@ -225,11 +261,10 @@ class ApiUsageReporterTest {
     }
 
     @Test
-    void flushesNeverSendMoreThanMaxBatchSizeRecords() {
+    void flushNowSendsWholeQueueInOneRequest() {
         var httpClient = new InMemoryReactiveHttpClient();
         var scheduler = new ManualReporterScheduler();
         var reporter = reporterBuilder(httpClient, scheduler)
-                .maxBatchSize(2)
                 .maxQueueSize(10)
                 .build();
 
@@ -238,18 +273,12 @@ class ApiUsageReporterTest {
             assertThat(reporter.report(invocation("query GetUser { user { name } }"))).isTrue();
             assertThat(reporter.report(invocation("query GetUser { user { friend { id } } }"))).isTrue();
 
-            scheduler.runUntilIdle();
-            assertThat(httpClient.usageRequest(0).getEventsCount()).isEqualTo(2);
-
             StepVerifier.create(reporter.flushNow())
-                    .expectNextCount(1)
+                    .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(3))
                     .verifyComplete();
 
-            var recordCounts = httpClient.usageRequests().stream()
-                    .map(IngestUsageRequest::getEventsCount)
-                    .toList();
-            assertThat(recordCounts).allMatch(recordCount -> recordCount <= 2);
-            assertThat(recordCounts.stream().mapToInt(Integer::intValue).sum()).isEqualTo(3);
+            assertThat(httpClient.usageRequests()).hasSize(1);
+            assertThat(httpClient.usageRequest(0).getEventsCount()).isEqualTo(3);
             assertThat(reporter.getPendingQueueSize()).isZero();
         } finally {
             reporter.close();
@@ -257,7 +286,7 @@ class ApiUsageReporterTest {
     }
 
     @Test
-    void scheduledFlushSendsQueuedUsageAtFlushInterval() {
+    void scheduledFlushSendsQueuedUsageAtDefaultRandomBatchWindow() {
         var httpClient = new InMemoryReactiveHttpClient();
         var scheduler = new ManualReporterScheduler();
         var reporter = ApiUsageReporter.builder(httpClient)
@@ -265,18 +294,17 @@ class ApiUsageReporterTest {
                 .feddiGraphVariantKey("fddi_test_key")
                 .scheduler(scheduler)
                 .autoStart(true)
-                .flushInterval(Duration.ofSeconds(10))
-                .maxBatchSize(100)
                 .maxQueueSize(100)
-                .randomSupplier(() -> 0.0)
+                .randomSupplier(() -> 0.5)
                 .build();
 
         try {
             assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
             assertThat(httpClient.requests()).isEmpty();
 
-            scheduler.advanceBy(Duration.ofSeconds(9));
-            assertThat(httpClient.requests()).isEmpty();
+            scheduler.advanceBy(Duration.ofSeconds(29));
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+            assertThat(httpClient.usageRequests()).isEmpty();
 
             scheduler.advanceBy(Duration.ofSeconds(1));
 
@@ -288,14 +316,74 @@ class ApiUsageReporterTest {
     }
 
     @Test
+    void scheduledFlushResamplesBatchWindowAfterEachFlush() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        var scheduler = new ManualReporterScheduler();
+        var randomSupplier = new MutableDoubleSupplier(0.25);
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .batchWindow(Duration.ofSeconds(20), Duration.ofSeconds(40))
+                .randomSupplier(randomSupplier)
+                .build();
+
+        try {
+            assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+            scheduler.advanceBy(Duration.ofSeconds(24));
+            assertThat(httpClient.usageRequests()).isEmpty();
+
+            randomSupplier.set(0.75);
+            scheduler.advanceBy(Duration.ofSeconds(1));
+            assertThat(httpClient.usageRequest(0).getEventsCount()).isEqualTo(1);
+
+            assertThat(reporter.report(invocation("query GetUser { user { name } }"))).isTrue();
+
+            scheduler.advanceBy(Duration.ofSeconds(34));
+            assertThat(httpClient.usageRequests()).hasSize(1);
+
+            scheduler.advanceBy(Duration.ofSeconds(1));
+            assertThat(httpClient.usageRequests()).hasSize(2);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
+    void backgroundFlushTriggersAreCoalescedWhileFlushIsInFlight() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueResponse(Mono.never());
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
+                .maxQueueSize(2)
+                .build();
+
+        try {
+            assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+            scheduler.advanceBy(Duration.ofSeconds(1));
+            int requestsDuringInFlightFlush = httpClient.requests().size();
+            assertThat(requestsDuringInFlightFlush).isGreaterThan(0);
+
+            assertThat(reporter.report(invocation("query GetUser { user { name } }"))).isTrue();
+            assertThat(reporter.report(invocation("query GetUser { user { friend { id } } }"))).isTrue();
+            scheduler.runUntilIdle();
+
+            assertThat(httpClient.requests()).hasSize(requestsDuringInFlightFlush);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
     void flush_recalculatesSamplingSamplesOutRequestsAndCapturesMultiplierOnQueuedEvents() {
         var httpClient = new InMemoryReactiveHttpClient();
         var randomSupplier = new MutableDoubleSupplier(0.0);
         var reporter = reporterBuilder(httpClient)
-                .flushInterval(Duration.ofSeconds(1))
-                .maxBatchSize(1000)
+                .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
                 .maxQueueSize(2000)
                 .randomSupplier(randomSupplier)
+                .samplingEnabled(true)
                 .build();
 
         for (int i = 0; i < 150; i++) {
@@ -328,7 +416,7 @@ class ApiUsageReporterTest {
     void flush_adjustsSamplingToOneHundredPercentBelowOneHundredRequestsPerSecond() {
         var httpClient = new InMemoryReactiveHttpClient();
         var randomSupplier = new MutableDoubleSupplier(0.999);
-        var reporter = samplingReporter(httpClient, randomSupplier, 100);
+        var reporter = samplingReporter(httpClient, randomSupplier);
 
         for (int i = 0; i < 99; i++) {
             assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
@@ -354,7 +442,7 @@ class ApiUsageReporterTest {
     void flush_adjustsSamplingToTenPercentFromOneHundredRequestsPerSecond() {
         var httpClient = new InMemoryReactiveHttpClient();
         var randomSupplier = new MutableDoubleSupplier(0.0);
-        var reporter = samplingReporter(httpClient, randomSupplier, 200);
+        var reporter = samplingReporter(httpClient, randomSupplier);
 
         queueUsage(reporter, 100);
 
@@ -382,7 +470,7 @@ class ApiUsageReporterTest {
     void flush_adjustsSamplingToOnePercentFromOneThousandRequestsPerSecond() {
         var httpClient = new InMemoryReactiveHttpClient();
         var randomSupplier = new MutableDoubleSupplier(0.0);
-        var reporter = samplingReporter(httpClient, randomSupplier, 1000);
+        var reporter = samplingReporter(httpClient, randomSupplier);
 
         queueUsage(reporter, 1000);
 
@@ -410,7 +498,7 @@ class ApiUsageReporterTest {
     void flush_adjustsSamplingToPointOnePercentFromTenThousandRequestsPerSecond() {
         var httpClient = new InMemoryReactiveHttpClient();
         var randomSupplier = new MutableDoubleSupplier(0.0);
-        var reporter = samplingReporter(httpClient, randomSupplier, 10_000);
+        var reporter = samplingReporter(httpClient, randomSupplier);
 
         queueUsage(reporter, 10_000);
 
@@ -435,12 +523,41 @@ class ApiUsageReporterTest {
     }
 
     @Test
+    void defaultSamplingDisabledQueuesEveryInvocationWithoutMultiplierAtHighRequestRate() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        var randomSupplier = new MutableDoubleSupplier(1.0);
+        var reporter = reporterBuilder(httpClient)
+                .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
+                .maxQueueSize(20_000)
+                .randomSupplier(randomSupplier)
+                .build();
+
+        queueUsage(reporter, 10_000);
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(10_000))
+                .verifyComplete();
+
+        assertThat(reporter.getSampleRate()).isEqualTo(1.0);
+        assertThat(reporter.getMultiplier()).isEqualTo(1);
+        assertThat(httpClient.usageRequest(0).getEventsList())
+                .allSatisfy(event -> assertThat(event.hasMultiplier()).isFalse());
+
+        assertThat(reporter.report(invocation("query GetUser { user { name } }"))).isTrue();
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        assertThat(httpClient.usageRequest(1).getEvents(0).hasMultiplier()).isFalse();
+    }
+
+    @Test
     void flushNow_reportsAnalyzerFailuresToHandlerDropsInvalidUsageAndSkipsHttp() {
         var httpClient = new InMemoryReactiveHttpClient();
         var errors = new CopyOnWriteArrayList<Throwable>();
         var reporter = reporterBuilder(httpClient)
                 .flushErrorHandler(errors::add)
-                .maxBatchSize(100)
                 .build();
 
         assertThat(reporter.report(invocationWithoutOperationName("""
@@ -464,7 +581,9 @@ class ApiUsageReporterTest {
                 .satisfies(error -> assertThat(error)
                         .isInstanceOf(IllegalArgumentException.class)
                         .hasMessage("operationName is required when the document contains multiple operations"));
-        assertThat(httpClient.requests()).isEmpty();
+        assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+        assertThat(httpClient.operationRequests()).isEmpty();
+        assertThat(httpClient.usageRequests()).isEmpty();
     }
 
     @Test
@@ -474,8 +593,8 @@ class ApiUsageReporterTest {
         var errors = new CopyOnWriteArrayList<Throwable>();
         var scheduler = new ManualReporterScheduler();
         var reporter = reporterBuilder(httpClient, scheduler)
+                .maxQueueSize(1)
                 .flushErrorHandler(errors::add)
-                .maxBatchSize(1)
                 .build();
 
         try {
@@ -484,7 +603,7 @@ class ApiUsageReporterTest {
 
             scheduler.runUntilIdle();
 
-            assertThat(httpClient.requests()).hasSize(2);
+            assertThat(httpClient.requests()).hasSize(3);
             assertThat(errors.getFirst())
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("network down");
@@ -500,7 +619,6 @@ class ApiUsageReporterTest {
         httpClient.enqueueStatus(200);
         httpClient.enqueueStatus(503);
         var reporter = reporterBuilder(httpClient)
-                .maxBatchSize(100)
                 .build();
 
         assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
@@ -518,7 +636,6 @@ class ApiUsageReporterTest {
     void closeAsyncFlushesPendingUsageAndRejectsFutureReports() {
         var httpClient = new InMemoryReactiveHttpClient();
         var reporter = reporterBuilder(httpClient)
-                .maxBatchSize(100)
                 .build();
 
         assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
@@ -532,10 +649,138 @@ class ApiUsageReporterTest {
     }
 
     @Test
+    void knownOperationHashPrefetchSkipsAlreadyRegisteredOperationDefinition() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.addKnownOperationHash(operationHash("query GetUser { user { id } }"));
+        var reporter = reporterBuilder(httpClient)
+                .build();
+
+        assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        assertThat(reporter.getKnownOperationCacheSize()).isEqualTo(1);
+        assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+        assertThat(httpClient.operationRequests()).isEmpty();
+        assertThat(httpClient.usageRequests()).hasSize(1);
+    }
+
+    @Test
+    void knownOperationHashPrefetchFailureFailsFlushAndIsRetried() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueKnownOperationHashesStatus(503);
+        var reporter = reporterBuilder(httpClient)
+                .build();
+
+        assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+        StepVerifier.create(reporter.flushNow())
+                .expectErrorSatisfies(error -> assertThat(error)
+                        .isInstanceOf(UsageReportClientException.class)
+                        .hasMessage("Usage report request failed with HTTP status 503"))
+                .verify();
+
+        assertThat(reporter.getPendingQueueSize()).isEqualTo(1);
+        assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+        assertThat(httpClient.operationRequests()).isEmpty();
+        assertThat(httpClient.usageRequests()).isEmpty();
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        assertThat(reporter.getPendingQueueSize()).isZero();
+        assertThat(httpClient.knownOperationHashesRequests()).hasSize(2);
+        assertThat(httpClient.operationRequests()).hasSize(1);
+        assertThat(httpClient.usageRequests()).hasSize(1);
+    }
+
+    @Test
+    void scheduledKnownOperationHashPrefetchFailureFailsFirstFlushAndRetriesLater() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueKnownOperationHashesStatus(503);
+        var errors = new CopyOnWriteArrayList<Throwable>();
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .flushErrorHandler(errors::add)
+                .batchWindow(Duration.ofSeconds(10), Duration.ofSeconds(10))
+                .randomSupplier(() -> 0.5)
+                .build();
+
+        try {
+            assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+            scheduler.advanceBy(Duration.ofSeconds(5));
+
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+            assertThat(errors).isEmpty();
+
+            scheduler.advanceBy(Duration.ofSeconds(5));
+
+            assertThat(errors)
+                    .hasSize(1)
+                    .first()
+                    .satisfies(error -> assertThat(error)
+                            .isInstanceOf(UsageReportClientException.class)
+                            .hasMessage("Usage report request failed with HTTP status 503"));
+            assertThat(reporter.getPendingQueueSize()).isEqualTo(1);
+            assertThat(httpClient.operationRequests()).isEmpty();
+            assertThat(httpClient.usageRequests()).isEmpty();
+
+            scheduler.advanceBy(Duration.ofSeconds(10));
+
+            assertThat(reporter.getPendingQueueSize()).isZero();
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(2);
+            assertThat(httpClient.operationRequests()).hasSize(1);
+            assertThat(httpClient.usageRequests()).hasSize(1);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
+    void knownOperationHashPrefetchIsScheduledWithJitterBeforeFirstFlush() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .batchWindow(Duration.ofSeconds(10), Duration.ofSeconds(10))
+                .randomSupplier(() -> 0.5)
+                .build();
+
+        try {
+            scheduler.advanceBy(Duration.ofMillis(4_999));
+            assertThat(httpClient.knownOperationHashesRequests()).isEmpty();
+
+            scheduler.advanceBy(Duration.ofMillis(1));
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
+    void build_rejectsInvalidBatchWindow() {
+        var httpClient = new InMemoryReactiveHttpClient();
+
+        assertThatThrownBy(() -> reporterBuilder(httpClient)
+                .batchWindow(Duration.ZERO, Duration.ofSeconds(1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("min batch window must be positive");
+
+        assertThatThrownBy(() -> reporterBuilder(httpClient)
+                .batchWindow(Duration.ofSeconds(2), Duration.ofSeconds(1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("min batch window must not exceed max batch window");
+    }
+
+    @Test
     void successfulOperationRegistrationCachesHashAndSkipsRepeatedRegistration() {
         var httpClient = new InMemoryReactiveHttpClient();
         var reporter = reporterBuilder(httpClient)
-                .maxBatchSize(100)
                 .build();
 
         assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
@@ -563,7 +808,6 @@ class ApiUsageReporterTest {
         var errors = new CopyOnWriteArrayList<Throwable>();
         var reporter = reporterBuilder(httpClient)
                 .flushErrorHandler(errors::add)
-                .maxBatchSize(100)
                 .build();
 
         assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
@@ -595,7 +839,6 @@ class ApiUsageReporterTest {
         var errors = new CopyOnWriteArrayList<Throwable>();
         var reporter = reporterBuilder(httpClient)
                 .flushErrorHandler(errors::add)
-                .maxBatchSize(100)
                 .build();
 
         assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
@@ -632,7 +875,6 @@ class ApiUsageReporterTest {
         var errors = new CopyOnWriteArrayList<Throwable>();
         var reporter = reporterBuilder(httpClient)
                 .flushErrorHandler(errors::add)
-                .maxBatchSize(100)
                 .build();
 
         assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
@@ -661,27 +903,36 @@ class ApiUsageReporterTest {
                 .feddiGraphVariantKey("fddi_test_key")
                 .scheduler(scheduler)
                 .autoStart(false)
-                .flushInterval(Duration.ofSeconds(1))
+                .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
                 .maxQueueSize(100)
                 .randomSupplier(() -> 0.0);
     }
 
     private static ApiUsageReporter samplingReporter(
             InMemoryReactiveHttpClient httpClient,
-            MutableDoubleSupplier randomSupplier,
-            int maxBatchSize
+            MutableDoubleSupplier randomSupplier
     ) {
         return reporterBuilder(httpClient)
-                .flushInterval(Duration.ofSeconds(1))
-                .maxBatchSize(maxBatchSize)
+                .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
                 .maxQueueSize(20_000)
                 .randomSupplier(randomSupplier)
+                .samplingEnabled(true)
                 .build();
     }
 
     private static void queueUsage(ApiUsageReporter reporter, int count) {
         for (int i = 0; i < count; i++) {
             assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+        }
+    }
+
+    private static String operationHash(String documentBody) {
+        var usage = new ApiUsageDocumentAnalyzer().analyze(invocation(documentBody));
+        try {
+            var digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(usage.canonicalDocument().getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new AssertionError(e);
         }
     }
 
@@ -772,11 +1023,10 @@ class ApiUsageReporterTest {
         }
 
         @Override
-        public Cancellable scheduleAtFixedRate(Runnable task, Duration initialDelay, Duration period) {
+        public Cancellable schedule(Runnable task, Duration delay) {
             var scheduledTask = new ScheduledTask(
                     task,
-                    nowNanos + toNanos(initialDelay),
-                    toNanos(period)
+                    nowNanos + toNanos(delay)
             );
             scheduledTasks.add(scheduledTask);
             return () -> scheduledTask.cancelled = true;
@@ -829,7 +1079,7 @@ class ApiUsageReporterTest {
             if (scheduledTask.cancelled) {
                 return;
             }
-            scheduledTask.nextRunNanos += scheduledTask.periodNanos;
+            scheduledTask.cancelled = true;
             scheduledTask.task.run();
         }
 
@@ -851,14 +1101,12 @@ class ApiUsageReporterTest {
         private static final class ScheduledTask {
 
             private final Runnable task;
-            private final long periodNanos;
             private long nextRunNanos;
             private boolean cancelled;
 
-            private ScheduledTask(Runnable task, long nextRunNanos, long periodNanos) {
+            private ScheduledTask(Runnable task, long nextRunNanos) {
                 this.task = task;
                 this.nextRunNanos = nextRunNanos;
-                this.periodNanos = periodNanos;
             }
         }
     }
@@ -867,10 +1115,22 @@ class ApiUsageReporterTest {
 
         private final List<ReactiveHttpRequest> requests = new CopyOnWriteArrayList<>();
         private final Queue<Mono<ReactiveHttpResponse>> responses = new ConcurrentLinkedQueue<>();
+        private final Queue<Mono<ReactiveHttpResponse>> knownOperationHashesResponses = new ConcurrentLinkedQueue<>();
+        private final List<String> knownOperationHashes = new CopyOnWriteArrayList<>();
 
         @Override
         public Mono<ReactiveHttpResponse> exchange(ReactiveHttpRequest request) {
             requests.add(request);
+            if (request.uri().getPath().endsWith("/known-operation-hashes")) {
+                Mono<ReactiveHttpResponse> queuedResponse = knownOperationHashesResponses.poll();
+                if (queuedResponse != null) {
+                    return queuedResponse;
+                }
+                return Mono.just(protobufResponse(200, KnownOperationHashesResponse.newBuilder()
+                        .addAllOperationHashes(knownOperationHashes)
+                        .build()));
+            }
+
             Mono<ReactiveHttpResponse> queuedResponse = responses.poll();
             if (queuedResponse != null) {
                 return queuedResponse;
@@ -888,6 +1148,14 @@ class ApiUsageReporterTest {
                             .build()));
         }
 
+        private void addKnownOperationHash(String operationHash) {
+            knownOperationHashes.add(operationHash);
+        }
+
+        private void enqueueKnownOperationHashesStatus(int statusCode) {
+            knownOperationHashesResponses.add(Mono.just(new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(new byte[0]))));
+        }
+
         private void enqueueStatus(int statusCode) {
             responses.add(Mono.just(new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(new byte[0]))));
         }
@@ -902,8 +1170,25 @@ class ApiUsageReporterTest {
             responses.add(Mono.error(error));
         }
 
+        private void enqueueResponse(Mono<ReactiveHttpResponse> response) {
+            responses.add(response);
+        }
+
         private List<ReactiveHttpRequest> requests() {
             return requests;
+        }
+
+        private List<ReactiveHttpRequest> knownOperationHashesRequests() {
+            return requests.stream()
+                    .filter(request -> request.uri().getPath().endsWith("/known-operation-hashes"))
+                    .toList();
+        }
+
+        private ReactiveHttpRequest requestEndingWith(String pathSuffix) {
+            return requests.stream()
+                    .filter(request -> request.uri().getPath().endsWith(pathSuffix))
+                    .findFirst()
+                    .orElseThrow();
         }
 
         private RegisterOperationsRequest operationRequest(int index) {
@@ -929,6 +1214,10 @@ class ApiUsageReporterTest {
         }
 
         private static ReactiveHttpResponse protobufResponse(int statusCode, UsageReportResponse response) {
+            return new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(response.toByteArray()));
+        }
+
+        private static ReactiveHttpResponse protobufResponse(int statusCode, KnownOperationHashesResponse response) {
             return new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(response.toByteArray()));
         }
 

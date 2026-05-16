@@ -4,6 +4,7 @@ import dev.feddi.api.usage.http.ReactiveHttpClient;
 import dev.feddi.api.usage.http.ReactiveHttpRequest;
 import dev.feddi.api.usage.http.ReactiveHttpResponse;
 import dev.feddi.api.usage.v1.IngestUsageRequest;
+import dev.feddi.api.usage.v1.KnownOperationHashesResponse;
 import dev.feddi.api.usage.v1.RegisterOperationsRequest;
 import dev.feddi.api.usage.v1.UsageReportResponse;
 import graphql.parser.Parser;
@@ -29,12 +30,11 @@ final class ApiUsageReporterJcstressSupport {
     private ApiUsageReporterJcstressSupport() {
     }
 
-    static ApiUsageReporter reporter(CountingReactiveHttpClient httpClient, int maxBatchSize, int maxQueueSize) {
+    static ApiUsageReporter reporter(CountingReactiveHttpClient httpClient, int maxQueueSize) {
         return ApiUsageReporter.builder(httpClient)
                 .feddiGraphVariantKey("fddi_test_key")
                 .autoStart(false)
-                .flushInterval(Duration.ofDays(1))
-                .maxBatchSize(maxBatchSize)
+                .batchWindow(Duration.ofDays(1), Duration.ofDays(1))
                 .maxQueueSize(maxQueueSize)
                 .randomSupplier(() -> 0.0)
                 .scheduler(new NoopReporterScheduler())
@@ -83,6 +83,13 @@ final class ApiUsageReporterJcstressSupport {
         public Mono<ReactiveHttpResponse> exchange(ReactiveHttpRequest request) {
             return request.body()
                     .map(body -> {
+                        if (request.uri().getPath().endsWith("/known-operation-hashes")) {
+                            return new ReactiveHttpResponse(
+                                    200,
+                                    Map.of(),
+                                    Mono.just(KnownOperationHashesResponse.newBuilder().build().toByteArray())
+                            );
+                        }
                         int accepted;
                         if (request.uri().getPath().endsWith("/usage")) {
                             accepted = parseUsageRequest(body).getEventsCount();
@@ -141,7 +148,7 @@ final class ApiUsageReporterJcstressSupport {
         }
 
         @Override
-        public Cancellable scheduleAtFixedRate(Runnable task, Duration initialDelay, Duration period) {
+        public Cancellable schedule(Runnable task, Duration delay) {
             return () -> {};
         }
 

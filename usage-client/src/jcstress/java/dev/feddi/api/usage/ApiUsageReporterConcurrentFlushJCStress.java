@@ -22,7 +22,6 @@ public class ApiUsageReporterConcurrentFlushJCStress {
             new ApiUsageReporterJcstressSupport.CountingReactiveHttpClient();
     private final ApiUsageReporter reporter = ApiUsageReporterJcstressSupport.reporter(
             httpClient,
-            REPORTS_PER_ACTOR * 4,
             REPORTS_PER_ACTOR * 4
     );
 

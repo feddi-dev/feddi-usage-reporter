@@ -12,6 +12,13 @@ message RegisterOperationsRequest {
   repeated OperationDefinition operations = 1;
 }
 
+message GetKnownOperationHashesRequest {
+}
+
+message KnownOperationHashesResponse {
+  repeated string operation_hashes = 1;
+}
+
 message OperationDefinition {
   string operation_hash = 1;
   string operation_name = 2;

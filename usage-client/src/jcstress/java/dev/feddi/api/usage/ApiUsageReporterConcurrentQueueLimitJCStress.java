@@ -20,7 +20,7 @@ public class ApiUsageReporterConcurrentQueueLimitJCStress {
 
     private final ApiUsageReporterJcstressSupport.CountingReactiveHttpClient httpClient =
             new ApiUsageReporterJcstressSupport.CountingReactiveHttpClient();
-    private final ApiUsageReporter reporter = ApiUsageReporterJcstressSupport.reporter(httpClient, 100, 1);
+    private final ApiUsageReporter reporter = ApiUsageReporterJcstressSupport.reporter(httpClient, 1);
 
     private int report1Result;
     private int report2Result;

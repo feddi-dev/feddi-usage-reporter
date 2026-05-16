@@ -3,7 +3,9 @@ package dev.feddi.api.usage;
 import dev.feddi.api.usage.http.ReactiveHttpClient;
 import dev.feddi.api.usage.http.ReactiveHttpRequest;
 import dev.feddi.api.usage.http.ReactiveHttpResponse;
+import dev.feddi.api.usage.v1.GetKnownOperationHashesRequest;
 import dev.feddi.api.usage.v1.IngestUsageRequest;
+import dev.feddi.api.usage.v1.KnownOperationHashesResponse;
 import dev.feddi.api.usage.v1.OperationDefinition;
 import dev.feddi.api.usage.v1.RegisterOperationsRequest;
 import dev.feddi.api.usage.v1.UsageEvent;
@@ -94,6 +96,44 @@ class UsageReportClientTest {
     }
 
     @Test
+    void getKnownOperationHashes_sendsGzippedProtobufRequestToKnownHashesEndpoint() {
+        var capturedRequest = new AtomicReference<ReactiveHttpRequest>();
+        ReactiveHttpClient httpClient = request -> {
+            capturedRequest.set(request);
+            var response = KnownOperationHashesResponse.newBuilder()
+                    .addOperationHashes("hash-a")
+                    .addOperationHashes("hash-b")
+                    .build();
+            return Mono.just(new ReactiveHttpResponse(200, Map.of(), Mono.just(response.toByteArray())));
+        };
+        var client = new UsageReportClient(
+                httpClient,
+                URI.create("https://api.example.test"),
+                "fddi_test_key"
+        );
+
+        StepVerifier.create(client.getKnownOperationHashes())
+                .assertNext(response -> assertEquals(
+                        java.util.List.of("hash-a", "hash-b"),
+                        response.getOperationHashesList()
+                ))
+                .verifyComplete();
+
+        var httpRequest = capturedRequest.get();
+        assertCommonRequest(httpRequest, URI.create("https://api.example.test/api/usage-proto/known-operation-hashes"));
+        StepVerifier.create(httpRequest.body())
+                .assertNext(body -> {
+                    try {
+                        assertEquals(GetKnownOperationHashesRequest.getDefaultInstance(),
+                                GetKnownOperationHashesRequest.parseFrom(gunzip(body)));
+                    } catch (Exception e) {
+                        throw new AssertionError(e);
+                    }
+                })
+                .verifyComplete();
+    }
+
+    @Test
     void report_trimsTrailingSlashFromConfiguredHost() {
         var capturedRequest = new AtomicReference<ReactiveHttpRequest>();
         ReactiveHttpClient httpClient = successClient(capturedRequest, 0);
@@ -128,6 +168,23 @@ class UsageReportClientTest {
     }
 
     @Test
+    void getKnownOperationHashes_surfacesNonSuccessStatus() {
+        ReactiveHttpClient httpClient = request -> Mono.just(new ReactiveHttpResponse(503, Map.of(), Mono.just(new byte[0])));
+        var client = new UsageReportClient(
+                httpClient,
+                URI.create("https://api.example.test"),
+                "fddi_test_key"
+        );
+
+        StepVerifier.create(client.getKnownOperationHashes())
+                .expectErrorSatisfies(error -> {
+                    var usageError = (UsageReportClientException) error;
+                    assertEquals(503, usageError.statusCode());
+                })
+                .verify();
+    }
+
+    @Test
     void report_surfacesInvalidProtobufResponse() {
         ReactiveHttpClient httpClient = request -> Mono.just(new ReactiveHttpResponse(
                 200,
@@ -141,6 +198,24 @@ class UsageReportClientTest {
         );
 
         StepVerifier.create(client.report(IngestUsageRequest.newBuilder().build()))
+                .expectError(UsageReportClientException.class)
+                .verify();
+    }
+
+    @Test
+    void getKnownOperationHashes_surfacesInvalidProtobufResponse() {
+        ReactiveHttpClient httpClient = request -> Mono.just(new ReactiveHttpResponse(
+                200,
+                Map.of(),
+                Mono.just(new byte[]{1, 2, 3})
+        ));
+        var client = new UsageReportClient(
+                httpClient,
+                URI.create("https://api.example.test"),
+                "fddi_test_key"
+        );
+
+        StepVerifier.create(client.getKnownOperationHashes())
                 .expectError(UsageReportClientException.class)
                 .verify();
     }

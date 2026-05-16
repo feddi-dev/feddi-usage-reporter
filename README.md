@@ -13,18 +13,19 @@ The backend depends only on `usage-proto`. Applications should depend on
 configure `ApiUsageReporter` with a Feddi graph variant key via
 `feddiGraphVariantKey(...)`. The reporter sends gzipped protobuf requests to
 `https://feddi.dev` by default. Tests and self-hosted deployments can override
-the host, but the endpoint paths are fixed to `/api/usage-proto/operations`
-for operation definitions and `/api/usage-proto/usage` for usage events.
+the host, but the endpoint paths are fixed to
+`/api/usage-proto/known-operation-hashes`, `/api/usage-proto/operations`, and
+`/api/usage-proto/usage`.
 
 `ApiUsageReporter` receives a GraphQL Java `Document`, operation name, and
 `GraphQLSchema` for each completed API call. It generates an input-aware
 canonical operation document with `AstSignature`, extracts field coordinates,
-field argument coordinates, and input object field coordinates, samples
-high-throughput traffic, and periodically flushes protobuf batches to the
-feddi Platform. Operation definitions are registered separately from usage
-events. Each reporter keeps an in-memory cache of operation hashes it already
-registered, so repeated requests send only the hash and request-specific usage
-metadata.
+field argument coordinates, and input object field coordinates, optionally
+samples high-throughput traffic, and periodically flushes protobuf batches to
+the feddi Platform. Operation definitions are registered separately from usage
+events. Each reporter preloads hashes already registered for the graph variant
+and keeps an in-memory cache of hashes it registers itself, so repeated requests
+send only the hash and request-specific usage metadata.
 
 ## Usage Guide
 
@@ -129,7 +130,8 @@ boolean queued = reporter.report(ApiUsageInvocation.builder()
 ```
 
 `report(...)` is non-blocking. It returns `false` when the reporter is closed,
-the event was sampled out, or the in-memory queue is full.
+the event was sampled out after adaptive sampling was explicitly enabled, or
+the in-memory queue is full.
 
 Flush and close the reporter during application shutdown:
 
@@ -145,13 +147,16 @@ reporter.closeAsync().subscribe();
 
 ### Protobuf Transport
 
-The reporter uses two protobuf endpoints:
+The reporter uses three protobuf endpoints:
 
+- `/api/usage-proto/known-operation-hashes` fetches operation hashes already
+  registered for the graph variant so new reporters can avoid duplicate
+  operation-definition uploads.
 - `/api/usage-proto/operations` registers operation hashes, canonical
   documents, field coordinates, and input usage coordinates.
 - `/api/usage-proto/usage` ingests request usage events by operation hash.
 
-Both request bodies are gzip-compressed and sent with
+Request bodies are gzip-compressed and sent with
 `Content-Encoding: gzip`.
 
 ### Configuration
@@ -159,13 +164,21 @@ Both request bodies are gzip-compressed and sent with
 - `feddiGraphVariantKey(...)` is required and is used as the bearer token.
 - `host(...)` is optional. It must be an absolute host URI with no path other
   than an optional trailing slash, query, or fragment.
-- `flushInterval(...)` controls the scheduled background flush interval.
-- `maxBatchSize(...)` controls the maximum protobuf records per request.
-- `maxQueueSize(...)` controls the pending in-memory queue size.
+- `batchWindow(min, max)` controls the randomized scheduled background flush
+  window. Each background flush samples a new delay between the two durations.
+  The default window is 20-40 seconds.
+- Each flush sends all usage records that are queued when draining starts.
+- `maxQueueSize(...)` controls the pending in-memory queue size and therefore
+  bounds the largest automatic flush request. The default is 22,222 records,
+  derived from a 1 MB compressed request budget and about 45 compressed bytes
+  per usage record. The absolute maximum is 44,444 records, derived from a 2 MB
+  compressed request budget. Lower values can be configured; higher values are
+  rejected.
+- `samplingEnabled(...)` controls adaptive sampling and defaults to `false`.
 - `flushErrorHandler(...)` receives background flush failures and per-record
   analysis failures.
 
-Sampling is recalculated on every flush from the request count observed during
-the flush interval. Traffic below 100 requests per second sends every event.
-Higher traffic is sampled and sent with a multiplier so aggregate counts remain
-representative.
+When adaptive sampling is enabled, sampling is recalculated on every flush from
+the request count observed during the batch window. Traffic below 100 requests
+per second sends every event. Higher traffic is sampled and sent with a
+multiplier so aggregate counts remain representative.
