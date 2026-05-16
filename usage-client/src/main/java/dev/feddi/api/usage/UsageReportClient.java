@@ -3,7 +3,9 @@ package dev.feddi.api.usage;
 import com.google.protobuf.InvalidProtocolBufferException;
 import dev.feddi.api.usage.http.ReactiveHttpClient;
 import dev.feddi.api.usage.http.ReactiveHttpRequest;
+import dev.feddi.api.usage.v1.GetKnownOperationHashesRequest;
 import dev.feddi.api.usage.v1.IngestUsageRequest;
+import dev.feddi.api.usage.v1.KnownOperationHashesResponse;
 import dev.feddi.api.usage.v1.RegisterOperationsRequest;
 import dev.feddi.api.usage.v1.UsageReportResponse;
 import org.jspecify.annotations.Nullable;
@@ -21,18 +23,21 @@ final class UsageReportClient {
 
     static final String PROTOBUF_CONTENT_TYPE = "application/x-protobuf";
     static final String OPERATIONS_PROTO_PATH = "/api/usage-proto/operations";
+    static final String KNOWN_OPERATION_HASHES_PROTO_PATH = "/api/usage-proto/known-operation-hashes";
     static final String USAGE_PROTO_PATH = "/api/usage-proto/usage";
     static final URI DEFAULT_PLATFORM_HOST = URI.create("https://feddi.dev");
 
     private final ReactiveHttpClient httpClient;
     private final URI operationsEndpointUri;
+    private final URI knownOperationHashesEndpointUri;
     private final URI usageEndpointUri;
     private final String bearerToken;
 
     UsageReportClient(ReactiveHttpClient httpClient, URI host, String bearerToken) {
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.operationsEndpointUri = resolveEndpoint(Objects.requireNonNull(host, "host"), OPERATIONS_PROTO_PATH);
-        this.usageEndpointUri = resolveEndpoint(Objects.requireNonNull(host, "host"), USAGE_PROTO_PATH);
+        this.knownOperationHashesEndpointUri = resolveEndpoint(host, KNOWN_OPERATION_HASHES_PROTO_PATH);
+        this.usageEndpointUri = resolveEndpoint(host, USAGE_PROTO_PATH);
         this.bearerToken = requireNonBlank(bearerToken, "bearerToken");
     }
 
@@ -41,12 +46,31 @@ final class UsageReportClient {
         return send(operationsEndpointUri, request.toByteArray());
     }
 
+    Mono<KnownOperationHashesResponse> getKnownOperationHashes() {
+        var request = GetKnownOperationHashesRequest.newBuilder().build();
+        return send(
+                knownOperationHashesEndpointUri,
+                request.toByteArray(),
+                KnownOperationHashesResponse::parseFrom,
+                "known operation hashes response"
+        );
+    }
+
     Mono<UsageReportResponse> report(IngestUsageRequest request) {
         Objects.requireNonNull(request, "request");
         return send(usageEndpointUri, request.toByteArray());
     }
 
     private Mono<UsageReportResponse> send(URI endpointUri, byte[] protobufBody) {
+        return send(endpointUri, protobufBody, UsageReportResponse::parseFrom, "usage report response");
+    }
+
+    private <T> Mono<T> send(
+            URI endpointUri,
+            byte[] protobufBody,
+            ProtobufParser<T> responseParser,
+            String responseDescription
+    ) {
         byte[] compressedBody;
         try {
             compressedBody = gzip(protobufBody);
@@ -60,7 +84,7 @@ final class UsageReportClient {
                 .switchIfEmpty(Mono.error(new UsageReportClientException("HTTP client completed without a response")))
                 .flatMap(response -> response.body()
                         .defaultIfEmpty(new byte[0])
-                        .flatMap(body -> parseResponse(response.statusCode(), body)));
+                        .flatMap(body -> parseResponse(response.statusCode(), body, responseParser, responseDescription)));
     }
 
     private Map<String, List<String>> headers() {
@@ -72,7 +96,12 @@ final class UsageReportClient {
         );
     }
 
-    private static Mono<UsageReportResponse> parseResponse(int statusCode, byte[] body) {
+    private static <T> Mono<T> parseResponse(
+            int statusCode,
+            byte[] body,
+            ProtobufParser<T> responseParser,
+            String responseDescription
+    ) {
         if (statusCode < 200 || statusCode >= 300) {
             return Mono.error(new UsageReportClientException(
                     "Usage report request failed with HTTP status " + statusCode,
@@ -81,9 +110,9 @@ final class UsageReportClient {
         }
 
         try {
-            return Mono.just(UsageReportResponse.parseFrom(body));
+            return Mono.just(responseParser.parse(body));
         } catch (InvalidProtocolBufferException e) {
-            return Mono.error(new UsageReportClientException("Usage report response was not valid protobuf", e));
+            return Mono.error(new UsageReportClientException(responseDescription + " was not valid protobuf", e));
         }
     }
 
@@ -117,5 +146,9 @@ final class UsageReportClient {
             throw new IllegalArgumentException(name + " must not be blank");
         }
         return value;
+    }
+
+    private interface ProtobufParser<T> {
+        T parse(byte[] body) throws InvalidProtocolBufferException;
     }
 }

@@ -13,8 +13,9 @@ The backend depends only on `usage-proto`. Applications should depend on
 configure `ApiUsageReporter` with a Feddi graph variant key via
 `feddiGraphVariantKey(...)`. The reporter sends gzipped protobuf requests to
 `https://feddi.dev` by default. Tests and self-hosted deployments can override
-the host, but the endpoint paths are fixed to `/api/usage-proto/operations`
-for operation definitions and `/api/usage-proto/usage` for usage events.
+the host, but the endpoint paths are fixed to
+`/api/usage-proto/known-operation-hashes`, `/api/usage-proto/operations`, and
+`/api/usage-proto/usage`.
 
 `ApiUsageReporter` receives a GraphQL Java `Document`, operation name, and
 `GraphQLSchema` for each completed API call. It generates an input-aware
@@ -22,9 +23,9 @@ canonical operation document with `AstSignature`, extracts field coordinates,
 field argument coordinates, and input object field coordinates, samples
 high-throughput traffic, and periodically flushes protobuf batches to the
 feddi Platform. Operation definitions are registered separately from usage
-events. Each reporter keeps an in-memory cache of operation hashes it already
-registered, so repeated requests send only the hash and request-specific usage
-metadata.
+events. Each reporter preloads hashes already registered for the graph variant
+and keeps an in-memory cache of hashes it registers itself, so repeated requests
+send only the hash and request-specific usage metadata.
 
 ## Usage Guide
 
@@ -145,13 +146,16 @@ reporter.closeAsync().subscribe();
 
 ### Protobuf Transport
 
-The reporter uses two protobuf endpoints:
+The reporter uses three protobuf endpoints:
 
+- `/api/usage-proto/known-operation-hashes` fetches operation hashes already
+  registered for the graph variant so new reporters can avoid duplicate
+  operation-definition uploads.
 - `/api/usage-proto/operations` registers operation hashes, canonical
   documents, field coordinates, and input usage coordinates.
 - `/api/usage-proto/usage` ingests request usage events by operation hash.
 
-Both request bodies are gzip-compressed and sent with
+Request bodies are gzip-compressed and sent with
 `Content-Encoding: gzip`.
 
 ### Configuration

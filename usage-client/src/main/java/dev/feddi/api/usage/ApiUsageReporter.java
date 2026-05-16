@@ -48,7 +48,8 @@ import java.util.function.DoubleSupplier;
  * <p>HTTP transport is deliberately pluggable. Applications provide a {@link ReactiveHttpClient}
  * implementation, usually backed by the HTTP client they already use. The default host is
  * {@code https://feddi.dev}; endpoint paths are fixed to
- * {@code /api/usage-proto/operations} and {@code /api/usage-proto/usage}.
+ * {@code /api/usage-proto/known-operation-hashes}, {@code /api/usage-proto/operations}, and
+ * {@code /api/usage-proto/usage}.
  *
  * <p>Instances support concurrent {@code report(...)} calls. Call {@link #closeAsync()} or
  * {@link #close()} during shutdown to flush queued usage before the process exits.
@@ -82,6 +83,7 @@ public final class ApiUsageReporter implements AutoCloseable {
     private final Duration flushInterval;
     private final ReporterScheduler scheduler;
     private final ReporterScheduler.Cancellable scheduledFlush;
+    private final ReporterScheduler.Cancellable scheduledKnownOperationHashFetch;
     private final AtomicLong requestCounter = new AtomicLong(0);
     private final AtomicLong droppedCount = new AtomicLong(0);
     private final AtomicBoolean closed = new AtomicBoolean(false);
@@ -90,6 +92,9 @@ public final class ApiUsageReporter implements AutoCloseable {
     private final boolean samplingEnabled;
     private volatile double sampleRate = 1.0;
     private volatile int multiplier = 1;
+    private volatile boolean knownOperationHashesLoaded;
+    private @Nullable Mono<Void> knownOperationHashesFetch;
+    private @Nullable Throwable knownOperationHashesPrefetchFailure;
 
     private ApiUsageReporter(Builder builder) {
         this.client = new UsageReportClient(
@@ -111,12 +116,17 @@ public final class ApiUsageReporter implements AutoCloseable {
         this.scheduler = builder.scheduler != null ? builder.scheduler : new ScheduledExecutorReporterScheduler();
 
         if (builder.autoStart) {
+            this.scheduledKnownOperationHashFetch = scheduler.schedule(
+                    this::prefetchKnownOperationHashesSafely,
+                    randomDelayBeforeFirstFlush()
+            );
             this.scheduledFlush = scheduler.scheduleAtFixedRate(
                     this::processAndFlushSafely,
                     this.flushInterval,
                     this.flushInterval
             );
         } else {
+            this.scheduledKnownOperationHashFetch = () -> {};
             this.scheduledFlush = () -> {};
         }
     }
@@ -170,8 +180,9 @@ public final class ApiUsageReporter implements AutoCloseable {
     /**
      * Flushes one batch immediately.
      *
-     * <p>The returned {@link Mono} is cold; flushing starts when it is subscribed to. If no records
-     * are queued, the returned response has {@code accepted == 0} and no HTTP request is made.
+     * <p>The returned {@link Mono} is cold; flushing starts when it is subscribed to. The first
+     * flush fetches known operation hashes before draining queued records. If no records are queued,
+     * the returned response has {@code accepted == 0} after that initial cache load.
      *
      * @return response from the platform, or an accepted-zero response when there is nothing to send
      */
@@ -187,6 +198,7 @@ public final class ApiUsageReporter implements AutoCloseable {
     public Mono<UsageReportResponse> closeAsync() {
         synchronized (lifecycleLock) {
             if (closed.compareAndSet(false, true)) {
+                scheduledKnownOperationHashFetch.cancel();
                 scheduledFlush.cancel();
                 scheduler.close();
             }
@@ -217,7 +229,24 @@ public final class ApiUsageReporter implements AutoCloseable {
                 );
     }
 
+    private void prefetchKnownOperationHashesSafely() {
+        ensureKnownOperationHashesLoaded()
+                .subscribe(
+                        ignored -> {},
+                        this::recordKnownOperationHashesPrefetchFailure
+                );
+    }
+
     private Mono<UsageReportResponse> processAndFlush() {
+        Throwable prefetchFailure = consumeKnownOperationHashesPrefetchFailure();
+        if (prefetchFailure != null) {
+            return Mono.error(prefetchFailure);
+        }
+        return ensureKnownOperationHashesLoaded()
+                .then(Mono.defer(this::processAndFlushAfterKnownOperationHashLoad));
+    }
+
+    private Mono<UsageReportResponse> processAndFlushAfterKnownOperationHashLoad() {
         recalculateSampling();
 
         var batch = drainBatch();
@@ -236,6 +265,54 @@ public final class ApiUsageReporter implements AutoCloseable {
                     return Mono.just(UsageReportResponse.newBuilder().setAccepted(0).build());
                 })
                 .then(client.report(batch.usageRequest()));
+    }
+
+    private Mono<Void> ensureKnownOperationHashesLoaded() {
+        synchronized (lifecycleLock) {
+            if (knownOperationHashesLoaded) {
+                return Mono.empty();
+            }
+            if (knownOperationHashesFetch == null) {
+                knownOperationHashesFetch = client.getKnownOperationHashes()
+                        .doOnNext(response -> knownOperationHashes.addAll(response.getOperationHashesList()))
+                        .then()
+                        .doOnSuccess(ignored -> markKnownOperationHashesLoaded())
+                        .doOnError(ignored -> clearKnownOperationHashesFetch())
+                        .cache();
+            }
+            return knownOperationHashesFetch;
+        }
+    }
+
+    private void markKnownOperationHashesLoaded() {
+        synchronized (lifecycleLock) {
+            knownOperationHashesLoaded = true;
+            knownOperationHashesFetch = null;
+        }
+    }
+
+    private void clearKnownOperationHashesFetch() {
+        synchronized (lifecycleLock) {
+            if (!knownOperationHashesLoaded) {
+                knownOperationHashesFetch = null;
+            }
+        }
+    }
+
+    private void recordKnownOperationHashesPrefetchFailure(Throwable error) {
+        synchronized (lifecycleLock) {
+            if (!knownOperationHashesLoaded) {
+                knownOperationHashesPrefetchFailure = error;
+            }
+        }
+    }
+
+    private @Nullable Throwable consumeKnownOperationHashesPrefetchFailure() {
+        synchronized (lifecycleLock) {
+            Throwable error = knownOperationHashesPrefetchFailure;
+            knownOperationHashesPrefetchFailure = null;
+            return error;
+        }
     }
 
     private void recalculateSampling() {
@@ -392,6 +469,15 @@ public final class ApiUsageReporter implements AutoCloseable {
         return value;
     }
 
+    private Duration randomDelayBeforeFirstFlush() {
+        long flushNanos = flushInterval.toNanos();
+        if (flushNanos <= 1) {
+            return Duration.ZERO;
+        }
+        double random = Math.max(0.0, Math.min(randomSupplier.getAsDouble(), Math.nextDown(1.0)));
+        return Duration.ofNanos((long) (random * flushNanos));
+    }
+
     double getSampleRate() {
         return sampleRate;
     }
@@ -463,7 +549,8 @@ public final class ApiUsageReporter implements AutoCloseable {
          *
          * <p>The URI must be absolute and must not include a path other than an optional trailing
          * slash, query, or fragment. The endpoint paths remain fixed to
-         * {@code /api/usage-proto/operations} and {@code /api/usage-proto/usage}.
+         * {@code /api/usage-proto/known-operation-hashes}, {@code /api/usage-proto/operations},
+         * and {@code /api/usage-proto/usage}.
          *
          * @param host platform host, for example {@code https://feddi.dev}
          * @return this builder

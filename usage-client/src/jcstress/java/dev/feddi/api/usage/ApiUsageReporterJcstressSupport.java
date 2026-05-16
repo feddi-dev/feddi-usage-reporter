@@ -4,6 +4,7 @@ import dev.feddi.api.usage.http.ReactiveHttpClient;
 import dev.feddi.api.usage.http.ReactiveHttpRequest;
 import dev.feddi.api.usage.http.ReactiveHttpResponse;
 import dev.feddi.api.usage.v1.IngestUsageRequest;
+import dev.feddi.api.usage.v1.KnownOperationHashesResponse;
 import dev.feddi.api.usage.v1.RegisterOperationsRequest;
 import dev.feddi.api.usage.v1.UsageReportResponse;
 import graphql.parser.Parser;
@@ -83,6 +84,13 @@ final class ApiUsageReporterJcstressSupport {
         public Mono<ReactiveHttpResponse> exchange(ReactiveHttpRequest request) {
             return request.body()
                     .map(body -> {
+                        if (request.uri().getPath().endsWith("/known-operation-hashes")) {
+                            return new ReactiveHttpResponse(
+                                    200,
+                                    Map.of(),
+                                    Mono.just(KnownOperationHashesResponse.newBuilder().build().toByteArray())
+                            );
+                        }
                         int accepted;
                         if (request.uri().getPath().endsWith("/usage")) {
                             accepted = parseUsageRequest(body).getEventsCount();
@@ -138,6 +146,11 @@ final class ApiUsageReporterJcstressSupport {
 
         @Override
         public void execute(Runnable task) {
+        }
+
+        @Override
+        public Cancellable schedule(Runnable task, Duration delay) {
+            return () -> {};
         }
 
         @Override

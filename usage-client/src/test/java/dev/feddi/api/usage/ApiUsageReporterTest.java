@@ -4,6 +4,7 @@ import dev.feddi.api.usage.http.ReactiveHttpClient;
 import dev.feddi.api.usage.http.ReactiveHttpRequest;
 import dev.feddi.api.usage.http.ReactiveHttpResponse;
 import dev.feddi.api.usage.v1.IngestUsageRequest;
+import dev.feddi.api.usage.v1.KnownOperationHashesResponse;
 import dev.feddi.api.usage.v1.RegisterOperationsRequest;
 import dev.feddi.api.usage.v1.UsageReportResponse;
 import graphql.language.Document;
@@ -19,11 +20,14 @@ import reactor.test.StepVerifier;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -68,11 +72,11 @@ class ApiUsageReporterTest {
                 .verifyComplete();
 
         assertThat(reporter.getPendingQueueSize()).isZero();
-        assertThat(httpClient.requests()).hasSize(2);
+        assertThat(httpClient.requests()).hasSize(3);
     }
 
     @Test
-    void flushNow_returnsAcceptedZeroAndDoesNotCallHttpWhenQueueIsEmpty() {
+    void flushNow_prefetchesKnownOperationHashesAndReturnsAcceptedZeroWhenQueueIsEmpty() {
         var httpClient = new InMemoryReactiveHttpClient();
         var reporter = reporterBuilder(httpClient).build();
 
@@ -80,7 +84,9 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isZero())
                 .verifyComplete();
 
-        assertThat(httpClient.requests()).isEmpty();
+        assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+        assertThat(httpClient.operationRequests()).isEmpty();
+        assertThat(httpClient.usageRequests()).isEmpty();
     }
 
     @Test
@@ -116,7 +122,7 @@ class ApiUsageReporterTest {
                 .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
                 .verifyComplete();
 
-        var operationHttpRequest = httpClient.requests().getFirst();
+        var operationHttpRequest = httpClient.requestEndingWith("/operations");
         assertThat(operationHttpRequest.method()).isEqualTo("POST");
         assertThat(operationHttpRequest.uri()).isEqualTo(URI.create("https://feddi.dev/api/usage-proto/operations"));
         assertThat(operationHttpRequest.headers()).containsEntry("Authorization", List.of("Bearer fddi_test_key"));
@@ -124,7 +130,7 @@ class ApiUsageReporterTest {
         assertThat(operationHttpRequest.headers()).containsEntry("Content-Encoding", List.of("gzip"));
         assertThat(operationHttpRequest.headers()).containsEntry("Accept", List.of("application/x-protobuf"));
 
-        var usageHttpRequest = httpClient.requests().get(1);
+        var usageHttpRequest = httpClient.requestEndingWith("/usage");
         assertThat(usageHttpRequest.uri()).isEqualTo(URI.create("https://feddi.dev/api/usage-proto/usage"));
         assertThat(usageHttpRequest.headers()).containsEntry("Content-Encoding", List.of("gzip"));
 
@@ -276,7 +282,8 @@ class ApiUsageReporterTest {
             assertThat(httpClient.requests()).isEmpty();
 
             scheduler.advanceBy(Duration.ofSeconds(9));
-            assertThat(httpClient.requests()).isEmpty();
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+            assertThat(httpClient.usageRequests()).isEmpty();
 
             scheduler.advanceBy(Duration.ofSeconds(1));
 
@@ -496,7 +503,9 @@ class ApiUsageReporterTest {
                 .satisfies(error -> assertThat(error)
                         .isInstanceOf(IllegalArgumentException.class)
                         .hasMessage("operationName is required when the document contains multiple operations"));
-        assertThat(httpClient.requests()).isEmpty();
+        assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+        assertThat(httpClient.operationRequests()).isEmpty();
+        assertThat(httpClient.usageRequests()).isEmpty();
     }
 
     @Test
@@ -516,7 +525,7 @@ class ApiUsageReporterTest {
 
             scheduler.runUntilIdle();
 
-            assertThat(httpClient.requests()).hasSize(2);
+            assertThat(httpClient.requests()).hasSize(3);
             assertThat(errors.getFirst())
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("network down");
@@ -561,6 +570,123 @@ class ApiUsageReporterTest {
 
         assertThat(httpClient.usageRequest(0).getEventsCount()).isEqualTo(1);
         assertThat(reporter.report(invocation("query GetUser { user { name } }"))).isFalse();
+    }
+
+    @Test
+    void knownOperationHashPrefetchSkipsAlreadyRegisteredOperationDefinition() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.addKnownOperationHash(operationHash("query GetUser { user { id } }"));
+        var reporter = reporterBuilder(httpClient)
+                .maxBatchSize(100)
+                .build();
+
+        assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        assertThat(reporter.getKnownOperationCacheSize()).isEqualTo(1);
+        assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+        assertThat(httpClient.operationRequests()).isEmpty();
+        assertThat(httpClient.usageRequests()).hasSize(1);
+    }
+
+    @Test
+    void knownOperationHashPrefetchFailureFailsFlushAndIsRetried() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueKnownOperationHashesStatus(503);
+        var reporter = reporterBuilder(httpClient)
+                .maxBatchSize(100)
+                .build();
+
+        assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+        StepVerifier.create(reporter.flushNow())
+                .expectErrorSatisfies(error -> assertThat(error)
+                        .isInstanceOf(UsageReportClientException.class)
+                        .hasMessage("Usage report request failed with HTTP status 503"))
+                .verify();
+
+        assertThat(reporter.getPendingQueueSize()).isEqualTo(1);
+        assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+        assertThat(httpClient.operationRequests()).isEmpty();
+        assertThat(httpClient.usageRequests()).isEmpty();
+
+        StepVerifier.create(reporter.flushNow())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        assertThat(reporter.getPendingQueueSize()).isZero();
+        assertThat(httpClient.knownOperationHashesRequests()).hasSize(2);
+        assertThat(httpClient.operationRequests()).hasSize(1);
+        assertThat(httpClient.usageRequests()).hasSize(1);
+    }
+
+    @Test
+    void scheduledKnownOperationHashPrefetchFailureFailsFirstFlushAndRetriesLater() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueKnownOperationHashesStatus(503);
+        var errors = new CopyOnWriteArrayList<Throwable>();
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .flushErrorHandler(errors::add)
+                .flushInterval(Duration.ofSeconds(10))
+                .randomSupplier(() -> 0.5)
+                .maxBatchSize(100)
+                .build();
+
+        try {
+            assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+            scheduler.advanceBy(Duration.ofSeconds(5));
+
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+            assertThat(errors).isEmpty();
+
+            scheduler.advanceBy(Duration.ofSeconds(5));
+
+            assertThat(errors)
+                    .hasSize(1)
+                    .first()
+                    .satisfies(error -> assertThat(error)
+                            .isInstanceOf(UsageReportClientException.class)
+                            .hasMessage("Usage report request failed with HTTP status 503"));
+            assertThat(reporter.getPendingQueueSize()).isEqualTo(1);
+            assertThat(httpClient.operationRequests()).isEmpty();
+            assertThat(httpClient.usageRequests()).isEmpty();
+
+            scheduler.advanceBy(Duration.ofSeconds(10));
+
+            assertThat(reporter.getPendingQueueSize()).isZero();
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(2);
+            assertThat(httpClient.operationRequests()).hasSize(1);
+            assertThat(httpClient.usageRequests()).hasSize(1);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
+    void knownOperationHashPrefetchIsScheduledWithJitterBeforeFirstFlush() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .flushInterval(Duration.ofSeconds(10))
+                .randomSupplier(() -> 0.5)
+                .build();
+
+        try {
+            scheduler.advanceBy(Duration.ofMillis(4_999));
+            assertThat(httpClient.knownOperationHashesRequests()).isEmpty();
+
+            scheduler.advanceBy(Duration.ofMillis(1));
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+        } finally {
+            reporter.close();
+        }
     }
 
     @Test
@@ -717,6 +843,16 @@ class ApiUsageReporterTest {
         }
     }
 
+    private static String operationHash(String documentBody) {
+        var usage = new ApiUsageDocumentAnalyzer().analyze(invocation(documentBody));
+        try {
+            var digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(usage.canonicalDocument().getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+    }
+
     private static ApiUsageInvocation invocation(String documentBody) {
         return invocation("GetUser", documentBody);
     }
@@ -804,6 +940,17 @@ class ApiUsageReporterTest {
         }
 
         @Override
+        public Cancellable schedule(Runnable task, Duration delay) {
+            var scheduledTask = new ScheduledTask(
+                    task,
+                    nowNanos + toNanos(delay),
+                    0
+            );
+            scheduledTasks.add(scheduledTask);
+            return () -> scheduledTask.cancelled = true;
+        }
+
+        @Override
         public Cancellable scheduleAtFixedRate(Runnable task, Duration initialDelay, Duration period) {
             var scheduledTask = new ScheduledTask(
                     task,
@@ -861,7 +1008,11 @@ class ApiUsageReporterTest {
             if (scheduledTask.cancelled) {
                 return;
             }
-            scheduledTask.nextRunNanos += scheduledTask.periodNanos;
+            if (scheduledTask.periodNanos == 0) {
+                scheduledTask.cancelled = true;
+            } else {
+                scheduledTask.nextRunNanos += scheduledTask.periodNanos;
+            }
             scheduledTask.task.run();
         }
 
@@ -899,10 +1050,22 @@ class ApiUsageReporterTest {
 
         private final List<ReactiveHttpRequest> requests = new CopyOnWriteArrayList<>();
         private final Queue<Mono<ReactiveHttpResponse>> responses = new ConcurrentLinkedQueue<>();
+        private final Queue<Mono<ReactiveHttpResponse>> knownOperationHashesResponses = new ConcurrentLinkedQueue<>();
+        private final List<String> knownOperationHashes = new CopyOnWriteArrayList<>();
 
         @Override
         public Mono<ReactiveHttpResponse> exchange(ReactiveHttpRequest request) {
             requests.add(request);
+            if (request.uri().getPath().endsWith("/known-operation-hashes")) {
+                Mono<ReactiveHttpResponse> queuedResponse = knownOperationHashesResponses.poll();
+                if (queuedResponse != null) {
+                    return queuedResponse;
+                }
+                return Mono.just(protobufResponse(200, KnownOperationHashesResponse.newBuilder()
+                        .addAllOperationHashes(knownOperationHashes)
+                        .build()));
+            }
+
             Mono<ReactiveHttpResponse> queuedResponse = responses.poll();
             if (queuedResponse != null) {
                 return queuedResponse;
@@ -918,6 +1081,14 @@ class ApiUsageReporterTest {
                     .map(accepted -> protobufResponse(200, UsageReportResponse.newBuilder()
                             .setAccepted(accepted)
                             .build()));
+        }
+
+        private void addKnownOperationHash(String operationHash) {
+            knownOperationHashes.add(operationHash);
+        }
+
+        private void enqueueKnownOperationHashesStatus(int statusCode) {
+            knownOperationHashesResponses.add(Mono.just(new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(new byte[0]))));
         }
 
         private void enqueueStatus(int statusCode) {
@@ -936,6 +1107,19 @@ class ApiUsageReporterTest {
 
         private List<ReactiveHttpRequest> requests() {
             return requests;
+        }
+
+        private List<ReactiveHttpRequest> knownOperationHashesRequests() {
+            return requests.stream()
+                    .filter(request -> request.uri().getPath().endsWith("/known-operation-hashes"))
+                    .toList();
+        }
+
+        private ReactiveHttpRequest requestEndingWith(String pathSuffix) {
+            return requests.stream()
+                    .filter(request -> request.uri().getPath().endsWith(pathSuffix))
+                    .findFirst()
+                    .orElseThrow();
         }
 
         private RegisterOperationsRequest operationRequest(int index) {
@@ -961,6 +1145,10 @@ class ApiUsageReporterTest {
         }
 
         private static ReactiveHttpResponse protobufResponse(int statusCode, UsageReportResponse response) {
+            return new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(response.toByteArray()));
+        }
+
+        private static ReactiveHttpResponse protobufResponse(int statusCode, KnownOperationHashesResponse response) {
             return new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(response.toByteArray()));
         }
 
