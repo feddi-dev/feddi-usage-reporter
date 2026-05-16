@@ -169,10 +169,11 @@ Request bodies are gzip-compressed and sent with
   The default window is 20-40 seconds.
 - Each flush sends all usage records that are queued when draining starts.
 - `maxQueueSize(...)` controls the pending in-memory queue size and therefore
-  bounds the largest automatic flush request. The default and absolute maximum
-  is 44,444 records, derived from a 2 MB compressed request budget and about
-  45 compressed bytes per usage record. Lower values can be configured; higher
-  values are rejected.
+  bounds the largest automatic flush request. The default is 22,222 records,
+  derived from a 1 MB compressed request budget and about 45 compressed bytes
+  per usage record. The absolute maximum is 44,444 records, derived from a 2 MB
+  compressed request budget. Lower values can be configured; higher values are
+  rejected.
 - `samplingEnabled(...)` controls adaptive sampling and defaults to `false`.
 - `flushErrorHandler(...)` receives background flush failures and per-record
   analysis failures.

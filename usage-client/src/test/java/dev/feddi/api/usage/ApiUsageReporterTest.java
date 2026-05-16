@@ -53,11 +53,12 @@ class ApiUsageReporterTest {
     }
 
     @Test
-    void defaultsUseNoSamplingTwentyToFortySecondBatchWindowAndTwoMbQueueCap() {
+    void defaultsUseNoSamplingTwentyToFortySecondBatchWindowAndOneMbQueueSize() {
         assertThat(ApiUsageReporter.DEFAULT_BATCH_WINDOW_MIN).isEqualTo(Duration.ofSeconds(20));
         assertThat(ApiUsageReporter.DEFAULT_BATCH_WINDOW_MAX).isEqualTo(Duration.ofSeconds(40));
-        assertThat(ApiUsageReporter.DEFAULT_MAX_QUEUE_SIZE).isEqualTo(44_444);
-        assertThat(ApiUsageReporter.ABSOLUTE_MAX_QUEUE_SIZE).isEqualTo(ApiUsageReporter.DEFAULT_MAX_QUEUE_SIZE);
+        assertThat(ApiUsageReporter.APPROX_COMPRESSED_USAGE_EVENT_BYTES).isEqualTo(45);
+        assertThat(ApiUsageReporter.DEFAULT_MAX_QUEUE_SIZE).isEqualTo(22_222);
+        assertThat(ApiUsageReporter.ABSOLUTE_MAX_QUEUE_SIZE).isEqualTo(44_444);
     }
 
     @Test

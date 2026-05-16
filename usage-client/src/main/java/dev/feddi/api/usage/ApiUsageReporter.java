@@ -57,9 +57,17 @@ import java.util.function.DoubleSupplier;
 public final class ApiUsageReporter implements AutoCloseable {
 
     /**
-     * Default maximum number of pending invocations held in memory before new events are dropped.
+     * Approximate compressed size of one usage event in bytes.
      */
-    public static final int DEFAULT_MAX_QUEUE_SIZE = 2_000_000 / 45;
+    public static final int APPROX_COMPRESSED_USAGE_EVENT_BYTES = 45;
+
+    /**
+     * Default maximum number of pending invocations held in memory before new events are dropped.
+     *
+     * <p>The default is derived from a 1 MB compressed request budget and the observed approximate
+     * compressed usage event size.
+     */
+    public static final int DEFAULT_MAX_QUEUE_SIZE = 1_000_000 / APPROX_COMPRESSED_USAGE_EVENT_BYTES;
 
     /**
      * Absolute maximum number of pending invocations held in memory.
@@ -67,7 +75,7 @@ public final class ApiUsageReporter implements AutoCloseable {
      * <p>The cap is derived from a 2 MB compressed request budget and an observed approximate
      * compressed usage event size of 45 bytes.
      */
-    public static final int ABSOLUTE_MAX_QUEUE_SIZE = DEFAULT_MAX_QUEUE_SIZE;
+    public static final int ABSOLUTE_MAX_QUEUE_SIZE = 2_000_000 / APPROX_COMPRESSED_USAGE_EVENT_BYTES;
 
     /**
      * Default lower bound for randomized background batch flush scheduling.
