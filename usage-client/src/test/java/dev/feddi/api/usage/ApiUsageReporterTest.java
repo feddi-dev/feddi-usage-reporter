@@ -223,6 +223,22 @@ class ApiUsageReporterTest {
     }
 
     @Test
+    void build_acceptsAbsoluteMaxQueueSize() {
+        var httpClient = new InMemoryReactiveHttpClient();
+
+        var reporter = reporterBuilder(httpClient)
+                .maxQueueSize(ApiUsageReporter.ABSOLUTE_MAX_QUEUE_SIZE)
+                .build();
+
+        try {
+            assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+            assertThat(reporter.getPendingQueueSize()).isEqualTo(1);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
     void report_triggersBackgroundFlushWhenQueueIsFull() {
         var httpClient = new InMemoryReactiveHttpClient();
         var scheduler = new ManualReporterScheduler();
