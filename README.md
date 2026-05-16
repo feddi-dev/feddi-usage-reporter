@@ -20,9 +20,9 @@ the host, but the endpoint paths are fixed to
 `ApiUsageReporter` receives a GraphQL Java `Document`, operation name, and
 `GraphQLSchema` for each completed API call. It generates an input-aware
 canonical operation document with `AstSignature`, extracts field coordinates,
-field argument coordinates, and input object field coordinates, samples
-high-throughput traffic, and periodically flushes protobuf batches to the
-feddi Platform. Operation definitions are registered separately from usage
+field argument coordinates, and input object field coordinates, optionally
+samples high-throughput traffic, and periodically flushes protobuf batches to
+the feddi Platform. Operation definitions are registered separately from usage
 events. Each reporter preloads hashes already registered for the graph variant
 and keeps an in-memory cache of hashes it registers itself, so repeated requests
 send only the hash and request-specific usage metadata.
@@ -130,7 +130,8 @@ boolean queued = reporter.report(ApiUsageInvocation.builder()
 ```
 
 `report(...)` is non-blocking. It returns `false` when the reporter is closed,
-the event was sampled out, or the in-memory queue is full.
+the event was sampled out after adaptive sampling was explicitly enabled, or
+the in-memory queue is full.
 
 Flush and close the reporter during application shutdown:
 
@@ -165,15 +166,18 @@ Request bodies are gzip-compressed and sent with
   than an optional trailing slash, query, or fragment.
 - `batchWindow(min, max)` controls the randomized scheduled background flush
   window. Each background flush samples a new delay between the two durations.
+  The default window is 20-40 seconds.
 - Each flush sends all usage records that are queued when draining starts.
 - `maxQueueSize(...)` controls the pending in-memory queue size and therefore
-  bounds the largest automatic flush request.
-- `samplingEnabled(...)` controls adaptive sampling and defaults to `true`.
+  bounds the largest automatic flush request. The default and absolute maximum
+  is 44,444 records, derived from a 2 MB compressed request budget and about
+  45 compressed bytes per usage record. Lower values can be configured; higher
+  values are rejected.
+- `samplingEnabled(...)` controls adaptive sampling and defaults to `false`.
 - `flushErrorHandler(...)` receives background flush failures and per-record
   analysis failures.
 
-Sampling is recalculated on every flush from the request count observed during
-the batch window. Traffic below 100 requests per second sends every event.
-Higher traffic is sampled and sent with a multiplier so aggregate counts remain
-representative. Disable sampling only for controlled tests that need to send
-every accepted invocation without a multiplier.
+When adaptive sampling is enabled, sampling is recalculated on every flush from
+the request count observed during the batch window. Traffic below 100 requests
+per second sends every event. Higher traffic is sampled and sent with a
+multiplier so aggregate counts remain representative.

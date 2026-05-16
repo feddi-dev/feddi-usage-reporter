@@ -59,7 +59,15 @@ public final class ApiUsageReporter implements AutoCloseable {
     /**
      * Default maximum number of pending invocations held in memory before new events are dropped.
      */
-    public static final int DEFAULT_MAX_QUEUE_SIZE = 10_000;
+    public static final int DEFAULT_MAX_QUEUE_SIZE = 2_000_000 / 45;
+
+    /**
+     * Absolute maximum number of pending invocations held in memory.
+     *
+     * <p>The cap is derived from a 2 MB compressed request budget and an observed approximate
+     * compressed usage event size of 45 bytes.
+     */
+    public static final int ABSOLUTE_MAX_QUEUE_SIZE = DEFAULT_MAX_QUEUE_SIZE;
 
     /**
      * Default lower bound for randomized background batch flush scheduling.
@@ -105,7 +113,7 @@ public final class ApiUsageReporter implements AutoCloseable {
                 requireNonBlank(builder.feddiGraphVariantKey, "feddiGraphVariantKey")
         );
         this.analyzer = new ApiUsageDocumentAnalyzer();
-        this.maxQueueSize = builder.maxQueueSize > 0 ? builder.maxQueueSize : DEFAULT_MAX_QUEUE_SIZE;
+        this.maxQueueSize = resolveMaxQueueSize(builder.maxQueueSize);
         this.batchWindowMin = builder.batchWindowMin;
         this.batchWindowMax = builder.batchWindowMax;
         this.flushErrorHandler = builder.flushErrorHandler != null ? builder.flushErrorHandler : ignored -> {};
@@ -141,8 +149,8 @@ public final class ApiUsageReporter implements AutoCloseable {
      * Queues a completed GraphQL invocation for reporting.
      *
      * <p>This method does not perform network I/O. It records the invocation in an in-memory queue
-     * and returns immediately. The invocation may be sampled out or dropped if the reporter is closed
-     * or the queue is full.
+     * and returns immediately. The invocation may be sampled out when adaptive sampling is enabled,
+     * or dropped if the reporter is closed or the queue is full.
      *
      * @param invocation completed API invocation to report
      * @return {@code true} when the invocation was queued, otherwise {@code false}
@@ -531,6 +539,17 @@ public final class ApiUsageReporter implements AutoCloseable {
         return value;
     }
 
+    private static int resolveMaxQueueSize(int configuredMaxQueueSize) {
+        int resolvedMaxQueueSize = configuredMaxQueueSize > 0
+                ? configuredMaxQueueSize
+                : DEFAULT_MAX_QUEUE_SIZE;
+        if (resolvedMaxQueueSize > ABSOLUTE_MAX_QUEUE_SIZE) {
+            throw new IllegalArgumentException(
+                    "max queue size must not exceed " + ABSOLUTE_MAX_QUEUE_SIZE);
+        }
+        return resolvedMaxQueueSize;
+    }
+
     private Duration randomKnownOperationHashPrefetchDelay() {
         return randomDuration(Duration.ZERO, batchWindowMin);
     }
@@ -595,7 +614,7 @@ public final class ApiUsageReporter implements AutoCloseable {
         private Duration batchWindowMin = DEFAULT_BATCH_WINDOW_MIN;
         private Duration batchWindowMax = DEFAULT_BATCH_WINDOW_MAX;
         private boolean autoStart = true;
-        private boolean samplingEnabled = true;
+        private boolean samplingEnabled = false;
         private @Nullable Consumer<Throwable> flushErrorHandler;
         private @Nullable DoubleSupplier randomSupplier;
         private @Nullable ReporterScheduler scheduler;
@@ -647,12 +666,17 @@ public final class ApiUsageReporter implements AutoCloseable {
          *
          * <p>When the queue is full, new usage events are dropped and
          * {@link ApiUsageReporter#report(ApiUsageInvocation)} returns {@code false}. Values less
-         * than or equal to zero use {@link ApiUsageReporter#DEFAULT_MAX_QUEUE_SIZE}.
+         * than or equal to zero use {@link ApiUsageReporter#DEFAULT_MAX_QUEUE_SIZE}. Values above
+         * {@link ApiUsageReporter#ABSOLUTE_MAX_QUEUE_SIZE} are rejected.
          *
          * @param maxQueueSize maximum pending queue size
          * @return this builder
          */
         public Builder maxQueueSize(int maxQueueSize) {
+            if (maxQueueSize > ABSOLUTE_MAX_QUEUE_SIZE) {
+                throw new IllegalArgumentException(
+                        "max queue size must not exceed " + ABSOLUTE_MAX_QUEUE_SIZE);
+            }
             this.maxQueueSize = maxQueueSize;
             return this;
         }
@@ -702,9 +726,9 @@ public final class ApiUsageReporter implements AutoCloseable {
         /**
          * Enables or disables adaptive usage sampling.
          *
-         * <p>Sampling is enabled by default. Disabling it queues every accepted invocation with
-         * multiplier {@code 1}, which is mainly useful for controlled load tests that need to
-         * validate exact ingestion and rollup volume.
+         * <p>Sampling is disabled by default. When disabled, every accepted invocation is queued
+         * with multiplier {@code 1}. Enabling sampling lets the reporter sample high-throughput
+         * traffic and send aggregate multipliers.
          *
          * @param samplingEnabled whether adaptive sampling is enabled
          * @return this builder

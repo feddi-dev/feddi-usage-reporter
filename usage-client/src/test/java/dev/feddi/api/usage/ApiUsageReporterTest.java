@@ -53,6 +53,14 @@ class ApiUsageReporterTest {
     }
 
     @Test
+    void defaultsUseNoSamplingTwentyToFortySecondBatchWindowAndTwoMbQueueCap() {
+        assertThat(ApiUsageReporter.DEFAULT_BATCH_WINDOW_MIN).isEqualTo(Duration.ofSeconds(20));
+        assertThat(ApiUsageReporter.DEFAULT_BATCH_WINDOW_MAX).isEqualTo(Duration.ofSeconds(40));
+        assertThat(ApiUsageReporter.DEFAULT_MAX_QUEUE_SIZE).isEqualTo(44_444);
+        assertThat(ApiUsageReporter.ABSOLUTE_MAX_QUEUE_SIZE).isEqualTo(ApiUsageReporter.DEFAULT_MAX_QUEUE_SIZE);
+    }
+
+    @Test
     void flushNow_isColdAndSendsQueuedUsageOnlyWhenSubscribed() {
         var httpClient = new InMemoryReactiveHttpClient();
         var reporter = reporterBuilder(httpClient)
@@ -204,6 +212,16 @@ class ApiUsageReporterTest {
     }
 
     @Test
+    void build_rejectsMaxQueueSizeAboveTwoMbCap() {
+        var httpClient = new InMemoryReactiveHttpClient();
+
+        assertThatThrownBy(() -> reporterBuilder(httpClient)
+                .maxQueueSize(ApiUsageReporter.ABSOLUTE_MAX_QUEUE_SIZE + 1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("max queue size must not exceed " + ApiUsageReporter.ABSOLUTE_MAX_QUEUE_SIZE);
+    }
+
+    @Test
     void report_triggersBackgroundFlushWhenQueueIsFull() {
         var httpClient = new InMemoryReactiveHttpClient();
         var scheduler = new ManualReporterScheduler();
@@ -251,7 +269,7 @@ class ApiUsageReporterTest {
     }
 
     @Test
-    void scheduledFlushSendsQueuedUsageAtRandomBatchWindow() {
+    void scheduledFlushSendsQueuedUsageAtDefaultRandomBatchWindow() {
         var httpClient = new InMemoryReactiveHttpClient();
         var scheduler = new ManualReporterScheduler();
         var reporter = ApiUsageReporter.builder(httpClient)
@@ -259,7 +277,6 @@ class ApiUsageReporterTest {
                 .feddiGraphVariantKey("fddi_test_key")
                 .scheduler(scheduler)
                 .autoStart(true)
-                .batchWindow(Duration.ofSeconds(20), Duration.ofSeconds(40))
                 .maxQueueSize(100)
                 .randomSupplier(() -> 0.5)
                 .build();
@@ -349,6 +366,7 @@ class ApiUsageReporterTest {
                 .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
                 .maxQueueSize(2000)
                 .randomSupplier(randomSupplier)
+                .samplingEnabled(true)
                 .build();
 
         for (int i = 0; i < 150; i++) {
@@ -488,14 +506,13 @@ class ApiUsageReporterTest {
     }
 
     @Test
-    void samplingDisabledQueuesEveryInvocationWithoutMultiplierAtHighRequestRate() {
+    void defaultSamplingDisabledQueuesEveryInvocationWithoutMultiplierAtHighRequestRate() {
         var httpClient = new InMemoryReactiveHttpClient();
         var randomSupplier = new MutableDoubleSupplier(1.0);
         var reporter = reporterBuilder(httpClient)
                 .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
                 .maxQueueSize(20_000)
                 .randomSupplier(randomSupplier)
-                .samplingEnabled(false)
                 .build();
 
         queueUsage(reporter, 10_000);
@@ -882,6 +899,7 @@ class ApiUsageReporterTest {
                 .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
                 .maxQueueSize(20_000)
                 .randomSupplier(randomSupplier)
+                .samplingEnabled(true)
                 .build();
     }
 
