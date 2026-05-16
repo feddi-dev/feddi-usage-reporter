@@ -163,15 +163,17 @@ Request bodies are gzip-compressed and sent with
 - `feddiGraphVariantKey(...)` is required and is used as the bearer token.
 - `host(...)` is optional. It must be an absolute host URI with no path other
   than an optional trailing slash, query, or fragment.
-- `flushInterval(...)` controls the scheduled background flush interval.
-- `maxBatchSize(...)` controls the maximum protobuf records per request.
-- `maxQueueSize(...)` controls the pending in-memory queue size.
+- `batchWindow(min, max)` controls the randomized scheduled background flush
+  window. Each background flush samples a new delay between the two durations.
+- Each flush sends all usage records that are queued when draining starts.
+- `maxQueueSize(...)` controls the pending in-memory queue size and therefore
+  bounds the largest automatic flush request.
 - `samplingEnabled(...)` controls adaptive sampling and defaults to `true`.
 - `flushErrorHandler(...)` receives background flush failures and per-record
   analysis failures.
 
 Sampling is recalculated on every flush from the request count observed during
-the flush interval. Traffic below 100 requests per second sends every event.
+the batch window. Traffic below 100 requests per second sends every event.
 Higher traffic is sampled and sent with a multiplier so aggregate counts remain
 representative. Disable sampling only for controlled tests that need to send
 every accepted invocation without a multiplier.

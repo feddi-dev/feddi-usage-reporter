@@ -57,19 +57,19 @@ import java.util.function.DoubleSupplier;
 public final class ApiUsageReporter implements AutoCloseable {
 
     /**
-     * Default maximum number of usage records sent in one protobuf request.
-     */
-    public static final int DEFAULT_BATCH_SIZE = 1000;
-
-    /**
      * Default maximum number of pending invocations held in memory before new events are dropped.
      */
     public static final int DEFAULT_MAX_QUEUE_SIZE = 10_000;
 
     /**
-     * Default interval for background flushing.
+     * Default lower bound for randomized background batch flush scheduling.
      */
-    public static final Duration DEFAULT_FLUSH_INTERVAL = Duration.ofSeconds(10);
+    public static final Duration DEFAULT_BATCH_WINDOW_MIN = Duration.ofSeconds(20);
+
+    /**
+     * Default upper bound for randomized background batch flush scheduling.
+     */
+    public static final Duration DEFAULT_BATCH_WINDOW_MAX = Duration.ofSeconds(40);
 
     private final UsageReportClient client;
     private final ApiUsageDocumentAnalyzer analyzer;
@@ -78,11 +78,10 @@ public final class ApiUsageReporter implements AutoCloseable {
     private final Set<String> knownOperationHashes = ConcurrentHashMap.newKeySet();
     private final AtomicInteger pendingCount = new AtomicInteger(0);
     private final Object lifecycleLock = new Object();
-    private final int maxBatchSize;
     private final int maxQueueSize;
-    private final Duration flushInterval;
+    private final Duration batchWindowMin;
+    private final Duration batchWindowMax;
     private final ReporterScheduler scheduler;
-    private final ReporterScheduler.Cancellable scheduledFlush;
     private final ReporterScheduler.Cancellable scheduledKnownOperationHashFetch;
     private final AtomicLong requestCounter = new AtomicLong(0);
     private final AtomicLong droppedCount = new AtomicLong(0);
@@ -95,6 +94,9 @@ public final class ApiUsageReporter implements AutoCloseable {
     private volatile boolean knownOperationHashesLoaded;
     private @Nullable Mono<Void> knownOperationHashesFetch;
     private @Nullable Throwable knownOperationHashesPrefetchFailure;
+    private ReporterScheduler.Cancellable scheduledFlush;
+    private boolean backgroundFlushInProgress;
+    private boolean backgroundFlushAgainRequested;
 
     private ApiUsageReporter(Builder builder) {
         this.client = new UsageReportClient(
@@ -103,11 +105,9 @@ public final class ApiUsageReporter implements AutoCloseable {
                 requireNonBlank(builder.feddiGraphVariantKey, "feddiGraphVariantKey")
         );
         this.analyzer = new ApiUsageDocumentAnalyzer();
-        this.maxBatchSize = builder.maxBatchSize > 0 ? builder.maxBatchSize : DEFAULT_BATCH_SIZE;
         this.maxQueueSize = builder.maxQueueSize > 0 ? builder.maxQueueSize : DEFAULT_MAX_QUEUE_SIZE;
-        this.flushInterval = builder.flushInterval != null && !builder.flushInterval.isNegative() && !builder.flushInterval.isZero()
-                ? builder.flushInterval
-                : DEFAULT_FLUSH_INTERVAL;
+        this.batchWindowMin = builder.batchWindowMin;
+        this.batchWindowMax = builder.batchWindowMax;
         this.flushErrorHandler = builder.flushErrorHandler != null ? builder.flushErrorHandler : ignored -> {};
         this.randomSupplier = builder.randomSupplier != null
                 ? builder.randomSupplier
@@ -118,16 +118,12 @@ public final class ApiUsageReporter implements AutoCloseable {
         if (builder.autoStart) {
             this.scheduledKnownOperationHashFetch = scheduler.schedule(
                     this::prefetchKnownOperationHashesSafely,
-                    randomDelayBeforeFirstFlush()
+                    randomKnownOperationHashPrefetchDelay()
             );
-            this.scheduledFlush = scheduler.scheduleAtFixedRate(
-                    this::processAndFlushSafely,
-                    this.flushInterval,
-                    this.flushInterval
-            );
+            this.scheduledFlush = scheduler.schedule(this::processScheduledFlush, randomBatchWindow());
         } else {
             this.scheduledKnownOperationHashFetch = () -> {};
-            this.scheduledFlush = () -> {};
+            this.scheduledFlush = null;
         }
     }
 
@@ -153,6 +149,7 @@ public final class ApiUsageReporter implements AutoCloseable {
      */
     public boolean report(ApiUsageInvocation invocation) {
         Objects.requireNonNull(invocation, "invocation");
+        boolean shouldStartFlush = false;
         synchronized (lifecycleLock) {
             if (closed.get()) {
                 return false;
@@ -170,19 +167,23 @@ public final class ApiUsageReporter implements AutoCloseable {
 
             pendingCount.incrementAndGet();
             pendingQueue.add(new PendingUsage(invocation, samplingEnabled ? multiplier : 1));
-            if (pendingCount.get() >= maxBatchSize) {
-                scheduler.execute(this::processAndFlushSafely);
+            if (pendingCount.get() >= maxQueueSize) {
+                shouldStartFlush = requestBackgroundFlushSoonLocked();
             }
+        }
+        if (shouldStartFlush) {
+            scheduler.execute(this::processBackgroundFlushSafely);
         }
         return true;
     }
 
     /**
-     * Flushes one batch immediately.
+     * Flushes all usage records that are queued when draining starts.
      *
      * <p>The returned {@link Mono} is cold; flushing starts when it is subscribed to. The first
-     * flush fetches known operation hashes before draining queued records. If no records are queued,
-     * the returned response has {@code accepted == 0} after that initial cache load.
+     * flush fetches known operation hashes before draining queued records. Records queued while the
+     * queue is being drained are left for a later flush. If no records are queued, the returned
+     * response has {@code accepted == 0} after that initial cache load.
      *
      * @return response from the platform, or an accepted-zero response when there is nothing to send
      */
@@ -199,7 +200,7 @@ public final class ApiUsageReporter implements AutoCloseable {
         synchronized (lifecycleLock) {
             if (closed.compareAndSet(false, true)) {
                 scheduledKnownOperationHashFetch.cancel();
-                scheduledFlush.cancel();
+                cancelScheduledFlushLocked();
                 scheduler.close();
             }
         }
@@ -221,12 +222,75 @@ public final class ApiUsageReporter implements AutoCloseable {
                 .block(Duration.ofSeconds(10));
     }
 
-    private void processAndFlushSafely() {
+    private void processScheduledFlush() {
+        boolean shouldStartFlush;
+        synchronized (lifecycleLock) {
+            scheduledFlush = null;
+            shouldStartFlush = requestBackgroundFlushSoonLocked();
+        }
+        if (shouldStartFlush) {
+            processBackgroundFlushSafely();
+        }
+    }
+
+    private boolean requestBackgroundFlushSoonLocked() {
+        if (closed.get()) {
+            return false;
+        }
+        if (backgroundFlushInProgress) {
+            backgroundFlushAgainRequested = true;
+            return false;
+        }
+        backgroundFlushInProgress = true;
+        cancelScheduledFlushLocked();
+        return true;
+    }
+
+    private void processBackgroundFlushSafely() {
         processAndFlush()
                 .subscribe(
                         ignored -> {},
-                        flushErrorHandler
+                        error -> {
+                            flushErrorHandler.accept(error);
+                            completeBackgroundFlush(true);
+                        },
+                        () -> completeBackgroundFlush(false)
                 );
+    }
+
+    private void completeBackgroundFlush(boolean failed) {
+        boolean shouldStartFlush = false;
+        synchronized (lifecycleLock) {
+            backgroundFlushInProgress = false;
+            boolean shouldDrainAgain = !failed
+                    && pendingCount.get() > 0
+                    && (pendingCount.get() >= maxQueueSize || backgroundFlushAgainRequested);
+            backgroundFlushAgainRequested = false;
+            if (closed.get()) {
+                return;
+            }
+            if (shouldDrainAgain) {
+                backgroundFlushInProgress = true;
+                shouldStartFlush = true;
+            } else {
+                scheduleNextFlushLocked();
+            }
+        }
+        if (shouldStartFlush) {
+            scheduler.execute(this::processBackgroundFlushSafely);
+        }
+    }
+
+    private void scheduleNextFlushLocked() {
+        cancelScheduledFlushLocked();
+        scheduledFlush = scheduler.schedule(this::processScheduledFlush, randomBatchWindow());
+    }
+
+    private void cancelScheduledFlushLocked() {
+        if (scheduledFlush != null) {
+            scheduledFlush.cancel();
+            scheduledFlush = null;
+        }
     }
 
     private void prefetchKnownOperationHashesSafely() {
@@ -249,7 +313,7 @@ public final class ApiUsageReporter implements AutoCloseable {
     private Mono<UsageReportResponse> processAndFlushAfterKnownOperationHashLoad() {
         recalculateSampling();
 
-        var batch = drainBatch();
+        var batch = drainQueue();
         if (batch.usageRequest().getEventsCount() == 0 && batch.operationDefinitions().isEmpty()) {
             return Mono.just(UsageReportResponse.newBuilder().setAccepted(0).build());
         }
@@ -322,7 +386,7 @@ public final class ApiUsageReporter implements AutoCloseable {
             multiplier = 1;
             return;
         }
-        double rps = count / (flushInterval.toMillis() / 1000.0);
+        double rps = count / (batchWindowMax.toNanos() / 1_000_000_000.0);
         if (rps < 100) {
             sampleRate = 1.0;
             multiplier = 1;
@@ -338,10 +402,11 @@ public final class ApiUsageReporter implements AutoCloseable {
         }
     }
 
-    private DrainedBatch drainBatch() {
-        var events = new ArrayList<UsageEvent>(maxBatchSize);
+    private DrainedBatch drainQueue() {
+        int recordsToDrain = pendingCount.get();
+        var events = new ArrayList<UsageEvent>(recordsToDrain);
         PendingUsage pending;
-        while (events.size() < maxBatchSize && (pending = pendingQueue.poll()) != null) {
+        for (int drained = 0; drained < recordsToDrain && (pending = pendingQueue.poll()) != null; drained++) {
             pendingCount.decrementAndGet();
             try {
                 events.add(toUsageEvent(pending));
@@ -400,11 +465,8 @@ public final class ApiUsageReporter implements AutoCloseable {
     }
 
     private List<OperationDefinition> drainOperationDefinitions() {
-        var operations = new ArrayList<OperationDefinition>(maxBatchSize);
+        var operations = new ArrayList<OperationDefinition>(pendingOperations.size());
         for (var entry : pendingOperations.entrySet()) {
-            if (operations.size() >= maxBatchSize) {
-                break;
-            }
             String operationHash = entry.getKey();
             OperationDefinition operation = entry.getValue();
             if (knownOperationHashes.contains(operationHash)) {
@@ -469,13 +531,22 @@ public final class ApiUsageReporter implements AutoCloseable {
         return value;
     }
 
-    private Duration randomDelayBeforeFirstFlush() {
-        long flushNanos = flushInterval.toNanos();
-        if (flushNanos <= 1) {
-            return Duration.ZERO;
+    private Duration randomKnownOperationHashPrefetchDelay() {
+        return randomDuration(Duration.ZERO, batchWindowMin);
+    }
+
+    private Duration randomBatchWindow() {
+        return randomDuration(batchWindowMin, batchWindowMax);
+    }
+
+    private Duration randomDuration(Duration min, Duration max) {
+        long minNanos = min.toNanos();
+        long maxNanos = max.toNanos();
+        if (minNanos == maxNanos) {
+            return min;
         }
         double random = Math.max(0.0, Math.min(randomSupplier.getAsDouble(), Math.nextDown(1.0)));
-        return Duration.ofNanos((long) (random * flushNanos));
+        return Duration.ofNanos(minNanos + (long) (random * (maxNanos - minNanos)));
     }
 
     double getSampleRate() {
@@ -520,9 +591,9 @@ public final class ApiUsageReporter implements AutoCloseable {
         private final ReactiveHttpClient httpClient;
         private URI host = UsageReportClient.DEFAULT_PLATFORM_HOST;
         private @Nullable String feddiGraphVariantKey;
-        private int maxBatchSize = DEFAULT_BATCH_SIZE;
         private int maxQueueSize = DEFAULT_MAX_QUEUE_SIZE;
-        private Duration flushInterval = DEFAULT_FLUSH_INTERVAL;
+        private Duration batchWindowMin = DEFAULT_BATCH_WINDOW_MIN;
+        private Duration batchWindowMax = DEFAULT_BATCH_WINDOW_MAX;
         private boolean autoStart = true;
         private boolean samplingEnabled = true;
         private @Nullable Consumer<Throwable> flushErrorHandler;
@@ -572,19 +643,6 @@ public final class ApiUsageReporter implements AutoCloseable {
         }
 
         /**
-         * Sets the maximum number of usage records sent in one protobuf request.
-         *
-         * <p>Values less than or equal to zero use {@link ApiUsageReporter#DEFAULT_BATCH_SIZE}.
-         *
-         * @param maxBatchSize maximum batch size
-         * @return this builder
-         */
-        public Builder maxBatchSize(int maxBatchSize) {
-            this.maxBatchSize = maxBatchSize;
-            return this;
-        }
-
-        /**
          * Sets the maximum number of pending invocations held in memory.
          *
          * <p>When the queue is full, new usage events are dropped and
@@ -600,15 +658,30 @@ public final class ApiUsageReporter implements AutoCloseable {
         }
 
         /**
-         * Sets the background flush interval.
+         * Sets the randomized background batch flush window.
          *
-         * <p>Zero or negative durations use {@link ApiUsageReporter#DEFAULT_FLUSH_INTERVAL}.
+         * <p>Each scheduled background flush is delayed by a new random duration in the inclusive
+         * lower-bound and exclusive upper-bound range. Use the same value for both arguments when
+         * deterministic fixed-delay scheduling is needed.
          *
-         * @param flushInterval interval between automatic flushes
+         * @param min minimum delay between automatic flushes
+         * @param max maximum delay between automatic flushes
          * @return this builder
          */
-        public Builder flushInterval(Duration flushInterval) {
-            this.flushInterval = Objects.requireNonNull(flushInterval, "flushInterval");
+        public Builder batchWindow(Duration min, Duration max) {
+            Objects.requireNonNull(min, "min");
+            Objects.requireNonNull(max, "max");
+            if (min.isZero() || min.isNegative()) {
+                throw new IllegalArgumentException("min batch window must be positive");
+            }
+            if (max.isZero() || max.isNegative()) {
+                throw new IllegalArgumentException("max batch window must be positive");
+            }
+            if (min.compareTo(max) > 0) {
+                throw new IllegalArgumentException("min batch window must not exceed max batch window");
+            }
+            this.batchWindowMin = min;
+            this.batchWindowMax = max;
             return this;
         }
 

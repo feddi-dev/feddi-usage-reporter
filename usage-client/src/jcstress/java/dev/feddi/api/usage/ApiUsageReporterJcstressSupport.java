@@ -30,12 +30,11 @@ final class ApiUsageReporterJcstressSupport {
     private ApiUsageReporterJcstressSupport() {
     }
 
-    static ApiUsageReporter reporter(CountingReactiveHttpClient httpClient, int maxBatchSize, int maxQueueSize) {
+    static ApiUsageReporter reporter(CountingReactiveHttpClient httpClient, int maxQueueSize) {
         return ApiUsageReporter.builder(httpClient)
                 .feddiGraphVariantKey("fddi_test_key")
                 .autoStart(false)
-                .flushInterval(Duration.ofDays(1))
-                .maxBatchSize(maxBatchSize)
+                .batchWindow(Duration.ofDays(1), Duration.ofDays(1))
                 .maxQueueSize(maxQueueSize)
                 .randomSupplier(() -> 0.0)
                 .scheduler(new NoopReporterScheduler())
@@ -150,11 +149,6 @@ final class ApiUsageReporterJcstressSupport {
 
         @Override
         public Cancellable schedule(Runnable task, Duration delay) {
-            return () -> {};
-        }
-
-        @Override
-        public Cancellable scheduleAtFixedRate(Runnable task, Duration initialDelay, Duration period) {
             return () -> {};
         }
 
