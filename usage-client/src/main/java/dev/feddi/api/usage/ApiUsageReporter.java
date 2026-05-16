@@ -45,6 +45,14 @@ import java.util.function.DoubleSupplier;
  * hash from the canonical document, registers unknown operations in gzipped protobuf batches, and
  * sends usage batches containing only operation hashes and request-specific metadata.
  *
+ * <p>The batch window controls how often the background scheduler attempts to flush queued usage.
+ * The queue size controls how many usage records can wait for that flush. Each automatic flush
+ * drains the whole queue as it exists when draining starts, so the largest automatic usage request
+ * is bounded by {@link #DEFAULT_MAX_QUEUE_SIZE} by default and by
+ * {@link #ABSOLUTE_MAX_QUEUE_SIZE} for any custom configuration. If the queue reaches the configured
+ * limit before the next scheduled window, the reporter starts a background flush early and drops
+ * additional events until space is available.
+ *
  * <p>HTTP transport is deliberately pluggable. Applications provide a {@link ReactiveHttpClient}
  * implementation, usually backed by the HTTP client they already use. The default host is
  * {@code https://feddi.dev}; endpoint paths are fixed to
@@ -677,6 +685,10 @@ public final class ApiUsageReporter implements AutoCloseable {
          * than or equal to zero use {@link ApiUsageReporter#DEFAULT_MAX_QUEUE_SIZE}. Values above
          * {@link ApiUsageReporter#ABSOLUTE_MAX_QUEUE_SIZE} are rejected.
          *
+         * <p>This setting bounds both memory retained by pending usage and the largest automatic
+         * protobuf usage request, because each flush drains the whole queue that exists when
+         * draining starts. It does not split a flush into smaller requests.
+         *
          * @param maxQueueSize maximum pending queue size
          * @return this builder
          */
@@ -695,6 +707,13 @@ public final class ApiUsageReporter implements AutoCloseable {
          * <p>Each scheduled background flush is delayed by a new random duration in the inclusive
          * lower-bound and exclusive upper-bound range. Use the same value for both arguments when
          * deterministic fixed-delay scheduling is needed.
+         *
+         * <p>The window is time-based, not size-based. Records reported during the window accumulate
+         * in the pending queue until a scheduled flush drains the queue. If the queue reaches
+         * {@link ApiUsageReporter#DEFAULT_MAX_QUEUE_SIZE} or a custom {@link #maxQueueSize(int)}
+         * before the timer fires, the reporter starts a background flush early. Smaller windows lower
+         * expected batch size; larger windows increase expected batch size up to the configured queue
+         * limit.
          *
          * @param min minimum delay between automatic flushes
          * @param max maximum delay between automatic flushes
