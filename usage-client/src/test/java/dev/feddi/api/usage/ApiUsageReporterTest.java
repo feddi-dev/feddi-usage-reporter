@@ -15,6 +15,7 @@ import graphql.schema.idl.SchemaGenerator;
 import graphql.schema.idl.SchemaParser;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import reactor.test.StepVerifier;
 
 import java.io.ByteArrayInputStream;
@@ -346,6 +347,218 @@ class ApiUsageReporterTest {
         } finally {
             reporter.close();
         }
+    }
+
+    @Test
+    void scheduledFlushReschedulesWhenQueueIsEmptyAndKnownOperationHashPrefetchIsInFlight() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        var knownOperationHashesResponse = Sinks.<ReactiveHttpResponse>one();
+        httpClient.enqueueKnownOperationHashesResponse(knownOperationHashesResponse.asMono());
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .batchWindow(Duration.ofMillis(200), Duration.ofMillis(400))
+                .randomSupplier(() -> 0.0)
+                .build();
+
+        try {
+            scheduler.advanceBy(Duration.ZERO);
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+
+            scheduler.advanceBy(Duration.ofMillis(200));
+
+            assertThat(httpClient.usageRequests()).isEmpty();
+            assertThat(scheduler.activeScheduledTaskCount()).isEqualTo(1);
+        } finally {
+            assertThat(knownOperationHashesResponse.tryEmitValue(InMemoryReactiveHttpClient.protobufResponse(
+                    200,
+                    KnownOperationHashesResponse.newBuilder().build()
+            ))).isEqualTo(Sinks.EmitResult.OK);
+            reporter.close();
+        }
+    }
+
+    @Test
+    void scheduledFlushRecoversFromUsageHttpErrorAndFlushesLaterUsage() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueUsageError(new IllegalStateException("usage down"));
+        var errors = new CopyOnWriteArrayList<Throwable>();
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
+                .flushErrorHandler(errors::add)
+                .build();
+
+        try {
+            assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+            scheduler.advanceBy(Duration.ofSeconds(1));
+
+            assertThat(errors)
+                    .hasSize(1)
+                    .first()
+                    .satisfies(error -> assertThat(error)
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasMessage("usage down"));
+            assertThat(reporter.getPendingQueueSize()).isZero();
+            assertThat(httpClient.usageRequests()).hasSize(1);
+            assertThat(scheduler.activeScheduledTaskCount()).isEqualTo(1);
+
+            assertThat(reporter.report(invocation("query GetUser { user { name } }"))).isTrue();
+
+            scheduler.advanceBy(Duration.ofSeconds(1));
+
+            assertThat(errors).hasSize(1);
+            assertThat(reporter.getPendingQueueSize()).isZero();
+            assertThat(httpClient.usageRequests()).hasSize(2);
+            assertThat(httpClient.usageRequest(1).getEventsCount()).isEqualTo(1);
+            assertThat(scheduler.activeScheduledTaskCount()).isEqualTo(1);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
+    void scheduledFlushRetriesAfterKnownOperationHashPrefetchFailureWithInitiallyEmptyQueue() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueKnownOperationHashesStatus(503);
+        var errors = new CopyOnWriteArrayList<Throwable>();
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .batchWindow(Duration.ofSeconds(10), Duration.ofSeconds(10))
+                .randomSupplier(() -> 0.5)
+                .flushErrorHandler(errors::add)
+                .build();
+
+        try {
+            scheduler.advanceBy(Duration.ofSeconds(5));
+
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+            assertThat(errors).isEmpty();
+
+            scheduler.advanceBy(Duration.ofSeconds(5));
+
+            assertThat(errors).isEmpty();
+            assertThat(httpClient.usageRequests()).isEmpty();
+            assertThat(scheduler.activeScheduledTaskCount()).isEqualTo(1);
+
+            assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+            scheduler.advanceBy(Duration.ofSeconds(10));
+
+            assertThat(errors)
+                    .hasSize(1)
+                    .first()
+                    .satisfies(error -> assertThat(error)
+                            .isInstanceOf(UsageReportClientException.class)
+                            .hasMessage("Usage report request failed with HTTP status 503"));
+            assertThat(reporter.getPendingQueueSize()).isEqualTo(1);
+            assertThat(httpClient.usageRequests()).isEmpty();
+            assertThat(scheduler.activeScheduledTaskCount()).isEqualTo(1);
+
+            scheduler.advanceBy(Duration.ofSeconds(10));
+
+            assertThat(errors).hasSize(1);
+            assertThat(reporter.getPendingQueueSize()).isZero();
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(2);
+            assertThat(httpClient.operationRequests()).hasSize(1);
+            assertThat(httpClient.usageRequests()).hasSize(1);
+            assertThat(scheduler.activeScheduledTaskCount()).isEqualTo(1);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
+    void backgroundFlushCompletesAndReschedulesWhenFlushErrorHandlerThrows() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        httpClient.enqueueUsageError(new IllegalStateException("usage down"));
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
+                .flushErrorHandler(error -> {
+                    throw new IllegalStateException("handler failed", error);
+                })
+                .build();
+
+        try {
+            assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+            scheduler.advanceBy(Duration.ofSeconds(1));
+
+            assertThat(reporter.getPendingQueueSize()).isZero();
+            assertThat(httpClient.usageRequests()).hasSize(1);
+            assertThat(scheduler.activeScheduledTaskCount()).isEqualTo(1);
+
+            assertThat(reporter.report(invocation("query GetUser { user { name } }"))).isTrue();
+
+            scheduler.advanceBy(Duration.ofSeconds(1));
+
+            assertThat(reporter.getPendingQueueSize()).isZero();
+            assertThat(httpClient.usageRequests()).hasSize(2);
+            assertThat(httpClient.usageRequest(1).getEventsCount()).isEqualTo(1);
+            assertThat(scheduler.activeScheduledTaskCount()).isEqualTo(1);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
+    void canceledScheduledFlushDoesNotCreateDuplicateTimerWhenItRacesWithBackgroundFlush() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        var usageResponse = Sinks.<ReactiveHttpResponse>one();
+        httpClient.enqueueUsageResponse(usageResponse.asMono());
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
+                .maxQueueSize(1)
+                .build();
+
+        try {
+            assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+            scheduler.runUntilIdle();
+
+            assertThat(httpClient.usageRequests()).hasSize(1);
+            assertThat(scheduler.activeScheduledTaskCount()).isZero();
+
+            scheduler.runLastCancelledScheduledTask();
+
+            assertThat(scheduler.activeScheduledTaskCount()).isZero();
+
+            assertThat(usageResponse.tryEmitValue(InMemoryReactiveHttpClient.protobufResponse(
+                    200,
+                    UsageReportResponse.newBuilder().setAccepted(1).build()
+            ))).isEqualTo(Sinks.EmitResult.OK);
+
+            assertThat(reporter.getPendingQueueSize()).isZero();
+            assertThat(scheduler.activeScheduledTaskCount()).isEqualTo(1);
+        } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
+    void closeAsyncCancelsScheduledFlushAndRejectsFutureReports() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .batchWindow(Duration.ofSeconds(1), Duration.ofSeconds(1))
+                .build();
+
+        assertThat(reporter.report(invocation("query GetUser { user { id } }"))).isTrue();
+
+        StepVerifier.create(reporter.closeAsync())
+                .assertNext(response -> assertThat(response.getAccepted()).isEqualTo(1))
+                .verifyComplete();
+
+        assertThat(httpClient.usageRequest(0).getEventsCount()).isEqualTo(1);
+        assertThat(scheduler.activeScheduledTaskCount()).isZero();
+        assertThat(reporter.report(invocation("query GetUser { user { name } }"))).isFalse();
     }
 
     @Test
@@ -1061,6 +1274,20 @@ class ApiUsageReporterTest {
             runUntilIdle();
         }
 
+        private int activeScheduledTaskCount() {
+            return (int) scheduledTasks.stream()
+                    .filter(scheduledTask -> !scheduledTask.cancelled)
+                    .count();
+        }
+
+        private void runLastCancelledScheduledTask() {
+            ScheduledTask scheduledTask = scheduledTasks.stream()
+                    .filter(task -> task.cancelled)
+                    .max(Comparator.comparingLong(task -> task.nextRunNanos))
+                    .orElseThrow();
+            scheduledTask.task.run();
+        }
+
         @Override
         public void close() {
             closed = true;
@@ -1115,6 +1342,8 @@ class ApiUsageReporterTest {
 
         private final List<ReactiveHttpRequest> requests = new CopyOnWriteArrayList<>();
         private final Queue<Mono<ReactiveHttpResponse>> responses = new ConcurrentLinkedQueue<>();
+        private final Queue<Mono<ReactiveHttpResponse>> operationResponses = new ConcurrentLinkedQueue<>();
+        private final Queue<Mono<ReactiveHttpResponse>> usageResponses = new ConcurrentLinkedQueue<>();
         private final Queue<Mono<ReactiveHttpResponse>> knownOperationHashesResponses = new ConcurrentLinkedQueue<>();
         private final List<String> knownOperationHashes = new CopyOnWriteArrayList<>();
 
@@ -1131,21 +1360,21 @@ class ApiUsageReporterTest {
                         .build()));
             }
 
-            Mono<ReactiveHttpResponse> queuedResponse = responses.poll();
-            if (queuedResponse != null) {
-                return queuedResponse;
+            if (request.uri().getPath().endsWith("/operations")) {
+                return responseForEndpoint(operationResponses)
+                        .switchIfEmpty(request.body()
+                                .map(body -> parseOperationRequest(body).getOperationsCount())
+                                .map(accepted -> protobufResponse(200, UsageReportResponse.newBuilder()
+                                        .setAccepted(accepted)
+                                        .build())));
             }
 
-            return request.body()
-                    .map(body -> {
-                        if (request.uri().getPath().endsWith("/operations")) {
-                            return parseOperationRequest(body).getOperationsCount();
-                        }
-                        return parseUsageRequest(body).getEventsCount();
-                    })
-                    .map(accepted -> protobufResponse(200, UsageReportResponse.newBuilder()
-                            .setAccepted(accepted)
-                            .build()));
+            return responseForEndpoint(usageResponses)
+                    .switchIfEmpty(request.body()
+                            .map(body -> parseUsageRequest(body).getEventsCount())
+                            .map(accepted -> protobufResponse(200, UsageReportResponse.newBuilder()
+                                    .setAccepted(accepted)
+                                    .build())));
         }
 
         private void addKnownOperationHash(String operationHash) {
@@ -1154,6 +1383,10 @@ class ApiUsageReporterTest {
 
         private void enqueueKnownOperationHashesStatus(int statusCode) {
             knownOperationHashesResponses.add(Mono.just(new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(new byte[0]))));
+        }
+
+        private void enqueueKnownOperationHashesResponse(Mono<ReactiveHttpResponse> response) {
+            knownOperationHashesResponses.add(response);
         }
 
         private void enqueueStatus(int statusCode) {
@@ -1172,6 +1405,26 @@ class ApiUsageReporterTest {
 
         private void enqueueResponse(Mono<ReactiveHttpResponse> response) {
             responses.add(response);
+        }
+
+        private void enqueueUsageError(Throwable error) {
+            usageResponses.add(Mono.error(error));
+        }
+
+        private void enqueueUsageResponse(Mono<ReactiveHttpResponse> response) {
+            usageResponses.add(response);
+        }
+
+        private Mono<ReactiveHttpResponse> responseForEndpoint(Queue<Mono<ReactiveHttpResponse>> endpointResponses) {
+            Mono<ReactiveHttpResponse> queuedResponse = endpointResponses.poll();
+            if (queuedResponse != null) {
+                return queuedResponse;
+            }
+            queuedResponse = responses.poll();
+            if (queuedResponse != null) {
+                return queuedResponse;
+            }
+            return Mono.empty();
         }
 
         private List<ReactiveHttpRequest> requests() {

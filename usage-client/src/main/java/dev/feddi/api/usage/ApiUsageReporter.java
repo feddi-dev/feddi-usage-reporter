@@ -250,11 +250,26 @@ public final class ApiUsageReporter implements AutoCloseable {
         boolean shouldStartFlush;
         synchronized (lifecycleLock) {
             scheduledFlush = null;
+            if (closed.get()) {
+                return;
+            }
+            if (backgroundFlushInProgress) {
+                backgroundFlushAgainRequested = true;
+                return;
+            }
+            if (!hasPendingFlushWork()) {
+                scheduleNextFlushLocked();
+                return;
+            }
             shouldStartFlush = requestBackgroundFlushSoonLocked();
         }
         if (shouldStartFlush) {
             processBackgroundFlushSafely();
         }
+    }
+
+    private boolean hasPendingFlushWork() {
+        return pendingCount.get() > 0 || !pendingOperations.isEmpty();
     }
 
     private boolean requestBackgroundFlushSoonLocked() {
@@ -275,8 +290,11 @@ public final class ApiUsageReporter implements AutoCloseable {
                 .subscribe(
                         ignored -> {},
                         error -> {
-                            flushErrorHandler.accept(error);
-                            completeBackgroundFlush(true);
+                            try {
+                                flushErrorHandler.accept(error);
+                            } finally {
+                                completeBackgroundFlush(true);
+                            }
                         },
                         () -> completeBackgroundFlush(false)
                 );

@@ -24,7 +24,7 @@ final class ScheduledExecutorReporterScheduler implements ReporterScheduler {
 
     @Override
     public Cancellable schedule(Runnable task, Duration delay) {
-        var future = delegate.schedule(task, delay.toMillis(), TimeUnit.MILLISECONDS);
+        var future = delegate.schedule(task, delay.toNanos(), TimeUnit.NANOSECONDS);
         return () -> future.cancel(false);
     }
 
