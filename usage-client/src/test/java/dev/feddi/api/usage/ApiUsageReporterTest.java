@@ -15,6 +15,7 @@ import graphql.schema.idl.SchemaGenerator;
 import graphql.schema.idl.SchemaParser;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import reactor.test.StepVerifier;
 
 import java.io.ByteArrayInputStream;
@@ -344,6 +345,35 @@ class ApiUsageReporterTest {
             scheduler.advanceBy(Duration.ofSeconds(1));
             assertThat(httpClient.usageRequests()).hasSize(2);
         } finally {
+            reporter.close();
+        }
+    }
+
+    @Test
+    void scheduledFlushReschedulesWhenQueueIsEmptyAndKnownOperationHashPrefetchIsInFlight() {
+        var httpClient = new InMemoryReactiveHttpClient();
+        var knownOperationHashesResponse = Sinks.<ReactiveHttpResponse>one();
+        httpClient.enqueueKnownOperationHashesResponse(knownOperationHashesResponse.asMono());
+        var scheduler = new ManualReporterScheduler();
+        var reporter = reporterBuilder(httpClient, scheduler)
+                .autoStart(true)
+                .batchWindow(Duration.ofMillis(200), Duration.ofMillis(400))
+                .randomSupplier(() -> 0.0)
+                .build();
+
+        try {
+            scheduler.advanceBy(Duration.ZERO);
+            assertThat(httpClient.knownOperationHashesRequests()).hasSize(1);
+
+            scheduler.advanceBy(Duration.ofMillis(200));
+
+            assertThat(httpClient.usageRequests()).isEmpty();
+            assertThat(scheduler.activeScheduledTaskCount()).isEqualTo(1);
+        } finally {
+            assertThat(knownOperationHashesResponse.tryEmitValue(InMemoryReactiveHttpClient.protobufResponse(
+                    200,
+                    KnownOperationHashesResponse.newBuilder().build()
+            ))).isEqualTo(Sinks.EmitResult.OK);
             reporter.close();
         }
     }
@@ -1061,6 +1091,12 @@ class ApiUsageReporterTest {
             runUntilIdle();
         }
 
+        private int activeScheduledTaskCount() {
+            return (int) scheduledTasks.stream()
+                    .filter(scheduledTask -> !scheduledTask.cancelled)
+                    .count();
+        }
+
         @Override
         public void close() {
             closed = true;
@@ -1154,6 +1190,10 @@ class ApiUsageReporterTest {
 
         private void enqueueKnownOperationHashesStatus(int statusCode) {
             knownOperationHashesResponses.add(Mono.just(new ReactiveHttpResponse(statusCode, Map.of(), Mono.just(new byte[0]))));
+        }
+
+        private void enqueueKnownOperationHashesResponse(Mono<ReactiveHttpResponse> response) {
+            knownOperationHashesResponses.add(response);
         }
 
         private void enqueueStatus(int statusCode) {
