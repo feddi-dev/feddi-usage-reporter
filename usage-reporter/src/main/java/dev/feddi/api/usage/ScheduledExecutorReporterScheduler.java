@@ -11,7 +11,7 @@ final class ScheduledExecutorReporterScheduler implements ReporterScheduler {
 
     ScheduledExecutorReporterScheduler() {
         this.delegate = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread thread = new Thread(r, "feddi-api-usage-reporter");
+            Thread thread = new Thread(r, "feddi-usage-reporter");
             thread.setDaemon(true);
             return thread;
         });
