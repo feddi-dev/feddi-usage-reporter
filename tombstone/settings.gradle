@@ -1,4 +1,0 @@
-rootProject.name = 'feddi-api-usage-tombstone'
-
-include 'feddi-api-usage-client'
-include 'feddi-api-usage-proto'
