@@ -17,10 +17,10 @@ def centralPortalDir = layout.buildDirectory.dir('central-portal')
 
 def publicationName(Project project) {
     switch (project.name) {
-        case 'feddi-api-usage-client':
-            return 'feddi API Usage Client'
-        case 'feddi-api-usage-proto':
-            return 'feddi API Usage Proto'
+        case 'feddi-usage-reporter':
+            return 'feddi Usage Reporter'
+        case 'feddi-usage-proto':
+            return 'feddi Usage Proto'
         default:
             return project.name
     }
@@ -28,9 +28,9 @@ def publicationName(Project project) {
 
 def publicationDescription(Project project) {
     switch (project.name) {
-        case 'feddi-api-usage-client':
+        case 'feddi-usage-reporter':
             return 'Java client for reporting GraphQL API usage to the feddi Platform.'
-        case 'feddi-api-usage-proto':
+        case 'feddi-usage-proto':
             return 'Protobuf schema and generated Java classes for feddi API usage reports.'
         default:
             return project.description ?: project.name
@@ -80,7 +80,7 @@ subprojects {
                 pom {
                     name = publicationName(project)
                     description = publicationDescription(project)
-                    url = 'https://github.com/feddi-dev/feddi-api-usage-client'
+                    url = 'https://github.com/feddi-dev/feddi-usage-reporter'
 
                     licenses {
                         license {
@@ -100,9 +100,9 @@ subprojects {
                     }
 
                     scm {
-                        connection = 'scm:git:https://github.com/feddi-dev/feddi-api-usage-client.git'
-                        developerConnection = 'scm:git:https://github.com/feddi-dev/feddi-api-usage-client.git'
-                        url = 'https://github.com/feddi-dev/feddi-api-usage-client'
+                        connection = 'scm:git:https://github.com/feddi-dev/feddi-usage-reporter.git'
+                        developerConnection = 'scm:git:https://github.com/feddi-dev/feddi-usage-reporter.git'
+                        url = 'https://github.com/feddi-dev/feddi-usage-reporter'
                     }
                 }
             }
@@ -144,7 +144,7 @@ tasks.register('centralPortalBundle', Zip) {
     description = 'Builds the deployment bundle accepted by the Sonatype Central Portal Publisher API.'
     group = 'publishing'
     dependsOn tasks.named('publishToLocalMavenRepository')
-    archiveFileName = "feddi-api-usage-client-${releaseVersion}-central-bundle.zip"
+    archiveFileName = "feddi-usage-reporter-${releaseVersion}-central-bundle.zip"
     destinationDirectory = centralPortalDir
     from localMavenRepositoryDir
     doFirst {

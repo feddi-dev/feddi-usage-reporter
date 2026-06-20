@@ -3,7 +3,7 @@ plugins {
 }
 
 base {
-    archivesName = 'feddi-api-usage-client'
+    archivesName = 'feddi-usage-reporter'
 }
 
 jcstress {
@@ -11,7 +11,7 @@ jcstress {
 }
 
 dependencies {
-    api project(':feddi-api-usage-proto')
+    api project(':feddi-usage-proto')
     api 'com.graphql-java:graphql-java:0.0.0-2026-05-12T01-33-43-16153d0'
     api 'io.projectreactor:reactor-core:3.8.4'
     api 'org.jspecify:jspecify:1.0.0'

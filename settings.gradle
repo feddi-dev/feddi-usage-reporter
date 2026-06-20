@@ -1,7 +1,7 @@
-rootProject.name = 'feddi-api-usage-client'
+rootProject.name = 'feddi-usage-reporter'
 
 include 'usage-proto'
-include 'usage-client'
+include 'usage-reporter'
 
-project(':usage-proto').name = 'feddi-api-usage-proto'
-project(':usage-client').name = 'feddi-api-usage-client'
+project(':usage-proto').name = 'feddi-usage-proto'
+project(':usage-reporter').name = 'feddi-usage-reporter'

@@ -3,7 +3,7 @@ plugins {
 }
 
 base {
-    archivesName = 'feddi-api-usage-proto'
+    archivesName = 'feddi-usage-proto'
 }
 
 dependencies {
