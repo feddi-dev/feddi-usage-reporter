@@ -1,15 +1,15 @@
-# feddi API Usage Client
+# feddi Usage Reporter
 
 Java 21 modules for sending protobuf usage reports to the feddi Platform.
 
 ## Modules
 
 - `usage-proto`: protobuf schema and generated Java contract classes.
-- `usage-client`: GraphQL Java based API usage reporter, reactive client facade,
+- `usage-reporter`: GraphQL Java based API usage reporter, reactive client facade,
   and pluggable reactive HTTP transport API.
 
 feddi-platform depends only on `usage-proto`. Applications should depend on
-`usage-client`, provide their own `ReactiveHttpClient` implementation, and
+`usage-reporter`, provide their own `ReactiveHttpClient` implementation, and
 configure `ApiUsageReporter` with a feddi graph variant key via
 `feddiGraphVariantKey(...)`. The reporter sends gzipped protobuf requests to
 `https://feddi.dev` by default. Tests and self-hosted deployments can override
