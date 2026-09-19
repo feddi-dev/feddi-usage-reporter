@@ -9,7 +9,7 @@ allprojects {
 }
 
 group = 'dev.feddi.build'
-version = providers.gradleProperty('feddiApiUsageVersion').orElse('0.1.0-SNAPSHOT').get()
+version = providers.gradleProperty('feddiUsageReporterVersion').orElse('0.1.0-SNAPSHOT').get()
 
 def releaseVersion = version.toString()
 def localMavenRepositoryDir = layout.buildDirectory.dir('maven-repository')
@@ -110,7 +110,7 @@ subprojects {
 
         repositories {
             maven {
-                name = 'feddiApiUsage'
+                name = 'feddiUsageReporter'
                 url = localMavenRepositoryDir
             }
         }
@@ -122,7 +122,7 @@ subprojects {
 
     signing {
         required {
-            providers.gradleProperty('feddiApiUsageRequireSigning')
+            providers.gradleProperty('feddiUsageReporterRequireSigning')
                 .map { it.toBoolean() }
                 .orElse(false)
                 .get()
@@ -137,7 +137,7 @@ subprojects {
 tasks.register('publishToLocalMavenRepository') {
     description = 'Publishes all API usage artifacts to the build-local Maven repository.'
     group = 'publishing'
-    dependsOn subprojects.collect { it.tasks.named('publishAllPublicationsToFeddiApiUsageRepository') }
+    dependsOn subprojects.collect { it.tasks.named('publishAllPublicationsToFeddiUsageReporterRepository') }
 }
 
 tasks.register('centralPortalBundle', Zip) {
@@ -148,9 +148,9 @@ tasks.register('centralPortalBundle', Zip) {
     destinationDirectory = centralPortalDir
     from localMavenRepositoryDir
     doFirst {
-        if (providers.gradleProperty('feddiApiUsageRequireSigning').map { it.toBoolean() }.orElse(false).get() &&
+        if (providers.gradleProperty('feddiUsageReporterRequireSigning').map { it.toBoolean() }.orElse(false).get() &&
             providers.gradleProperty('signingInMemoryKey').getOrElse('').isBlank()) {
-            throw new GradleException('feddiApiUsageRequireSigning=true requires signingInMemoryKey')
+            throw new GradleException('feddiUsageReporterRequireSigning=true requires signingInMemoryKey')
         }
     }
 }
