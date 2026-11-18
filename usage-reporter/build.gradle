@@ -13,9 +13,9 @@ jcstress {
 dependencies {
     api project(':feddi-usage-proto')
     api 'com.graphql-java:graphql-java:0.0.0-2026-10-20T03-01-53-c083356'
-    api 'io.projectreactor:reactor-core:3.8.4'
-    api 'org.jspecify:jspecify:1.0.0'
+    api 'io.projectreactor:reactor-core:3.8.8'
+    api 'org.jspecify:jspecify:1.0.1'
 
-    testImplementation 'io.projectreactor:reactor-test:3.8.4'
+    testImplementation 'io.projectreactor:reactor-test:3.8.8'
     testImplementation 'org.assertj:assertj-core:3.27.7'
 }
