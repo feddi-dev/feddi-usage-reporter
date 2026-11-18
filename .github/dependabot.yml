@@ -23,3 +23,10 @@ updates:
           - "patch"
     cooldown:
       default-days: 7
+    ignore:
+      # protobuf-java and protoc follow the protobuf-java version managed by the
+      # Spring Boot release we target (spring-boot-dependencies' protobuf-java.version).
+      # Generated code needs a runtime at least as new as protoc, and Spring Boot's BOM
+      # pins the runtime in consumer apps, so bump these by hand together with Spring Boot.
+      - dependency-name: "com.google.protobuf:protobuf-java"
+      - dependency-name: "com.google.protobuf:protoc"
